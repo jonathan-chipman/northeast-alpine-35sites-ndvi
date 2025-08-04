@@ -1,0 +1,5 @@
+analysis,ndvi_metric,zone,n_sites,max_distance_km,n_neighbors_total,moran_i,expected_i,p_value,significant,interpretation
+mean NDVI trend magnitudes AZ,mean,AZ,35,500,650,0.202,-0.029,0,TRUE,Moderate positive spatial autocorrelation
+mean NDVI trend magnitudes USAZ,mean,USAZ,35,500,650,0.33,-0.029,0,TRUE,Strong positive spatial autocorrelation
+max NDVI trend magnitudes AZ,max,AZ,35,500,650,0.241,-0.029,0,TRUE,Moderate positive spatial autocorrelation
+max NDVI trend magnitudes USAZ,max,USAZ,35,500,650,0.273,-0.029,0,TRUE,Moderate positive spatial autocorrelation

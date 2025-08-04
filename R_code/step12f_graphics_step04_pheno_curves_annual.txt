@@ -1,0 +1,169 @@
+# Alpine zone project - data processing script
+# Step 04: Phenological Modeling (Time-varying seasonal cycles)
+#   Graphics export only
+#
+# Jonathan W. Chipman, Dartmouth College
+# Written with the assistance of Claude 4 Sonnet AI and GPT 4.1
+# Updated 2025-06-30
+
+# Reads output/step02_analysis_data_prepared.csv (from Steps 02 and 03)
+
+# Site to produce figure for
+selected_site <- "NH_PRE"
+selected_zone <- "AZ"
+years_to_plot <- 1985:2024
+doy_seq <- 152:273
+k_doy = 4
+k_year = 8
+
+# Writes the following output to the output "figures" folder:
+#   phenology_[site_id]_[zone].png
+
+# Required libraries
+library(tidyverse)
+library(mgcv)
+library(purrr)
+library(ggplot2)
+library(patchwork)
+
+# Set current step number
+step_str <- "Step 04a"
+step_txt <- "Graphics output for Phenological Modeling"
+
+# Set working directory and paths
+setwd("D:/alpine_zone/Paper_1_data")
+output_dir <- "output"
+log_file <- "processing_log.txt"
+
+# Initialize log file
+cat(step_str, step_txt, "\n", file = log_file, append = TRUE)
+cat("Analysis started:", format(Sys.time()), "\n", file = log_file, append = TRUE)
+
+# Read prepared data
+infile <- paste(output_dir, "step02_analysis_data_prepared.csv", sep="/")
+analysis_data <- read_csv(infile)
+
+# Function to fit phenological GAM
+fit_phenological_gam <- function(data, min_obs = 20) {
+  if (nrow(data) < min_obs) {
+    return(NULL)
+  }
+  
+  tryCatch({
+    gam_model <- gam(ndvi ~ te(doy, year, k = c(k_doy, k_year)), data = data, method = "REML")
+    return(gam_model)
+  }, error = function(e) {
+    return(NULL)
+  })
+}
+
+cat("Fitting phenological models...\n")
+
+phenological_models <- analysis_data %>%
+  group_by(site_id, zone) %>%
+  filter(n() >= 20) %>%  # minimum observations per site-zone
+  nest() %>%
+  mutate(
+    gam_model = map(data, fit_phenological_gam),
+    model_success = map_lgl(gam_model, ~ !is.null(.x))
+  )
+
+cat("Successfully fit", sum(phenological_models$model_success), "of", nrow(phenological_models), "phenological models\n")
+
+# Define growing season day-of-year range (152 to 273)
+season_start <- 152
+season_end <- 273
+season_days <- seq(season_start, season_end)
+
+# Draw and export figure with phenology plots for 1 sample site for each year, 1984-2024
+
+# Extract GAM model for selected site
+model_row <- phenological_models %>%
+  filter(site_id == selected_site, zone == selected_zone, model_success) %>%
+  slice(1)
+
+if(nrow(model_row) == 0) stop("No successful model found for selected site")
+
+gam_model <- model_row$gam_model[[1]]
+
+# Predict overall mean phenology curve (at mean year)
+overall_pred_grid <- tibble(
+  doy = doy_seq,
+  year = mean(analysis_data$year, na.rm = TRUE)
+)
+overall_pred_grid$pred <- predict(gam_model, newdata = overall_pred_grid)
+
+# Predict yearly phenology curves
+yearly_curves <- map_df(years_to_plot, function(yr) {
+  pred_grid <- tibble(doy = doy_seq, year = yr)
+  pred_grid$pred <- predict(gam_model, newdata = pred_grid)
+  pred_grid$year <- as.factor(yr)
+  pred_grid
+})
+
+# Filter observed data for site/zone/years
+obs_data <- analysis_data %>%
+  filter(site_id == selected_site, zone == selected_zone, year %in% years_to_plot, doy %in% doy_seq) %>%
+  mutate(year = as.factor(year))
+
+# Compute fixed y-axis limits from all relevant data
+y_min <- min(
+  min(overall_pred_grid$pred, na.rm = TRUE),
+  min(yearly_curves$pred, na.rm = TRUE),
+  min(obs_data$ndvi, na.rm = TRUE)
+)
+
+y_max <- max(
+  max(overall_pred_grid$pred, na.rm = TRUE),
+  max(yearly_curves$pred, na.rm = TRUE),
+  max(obs_data$ndvi, na.rm = TRUE)
+)
+
+# Adjust max and min to provide a little extra space
+y_min <- y_min * 0.98
+y_max <- y_max * 1.02
+
+# Print max and min values to processing log
+cat("Drawing phenology plots with y-axis from", y_min, "to", y_max, "and x-axis from Day", season_start, "to Day", season_end, "\n", file = log_file, append = TRUE)
+
+# Create plots per year with fixed axis and styles
+plots <- map(years_to_plot, function(yr) {
+  yearly_curve <- yearly_curves %>% filter(year == as.character(yr))
+  obs_year <- obs_data %>% filter(year == as.character(yr))
+  
+  ggplot() +
+    # (a) overall mean phenology dashed light gray line
+    geom_line(data = overall_pred_grid, aes(x = doy, y = pred),
+              color = "lightgray", linewidth = 3.2) +
+    # (b) year's modeled phenology dark gray line
+    geom_line(data = yearly_curve, aes(x = doy, y = pred), color = "black", linewidth = 1.2) +
+    # (c) raw NDVI observations as red points
+    geom_point(data = obs_year, aes(x = doy, y = ndvi), color = "red", size = 3.5) +
+    # No adjusted_ndvi points included
+    coord_cartesian(ylim = c(y_min, y_max), xlim = c(season_start, season_end), expand = FALSE) +
+    theme_minimal() +
+    theme(
+      axis.title = element_blank(),
+      axis.text = element_blank(),
+      axis.ticks = element_blank(),
+      panel.grid = element_blank(),
+      plot.title = element_text(hjust = 0.5, size = 20)
+    ) +
+    ggtitle(as.character(yr))
+})
+
+# Layout figure as 5 panels wide
+layout <- wrap_plots(plots, ncol = 5)
+
+# Create 'figures' directory inside output if it doesn't exist
+figures_dir <- file.path(output_dir, "figures")
+if (!dir.exists(figures_dir)) dir.create(figures_dir)
+
+# Write output file as PNG
+outfile <- paste(figures_dir, "/phenology_", selected_site, "_", selected_zone, ".png", sep="")
+ggsave(outfile,
+       plot = layout,
+       width = 12, height = 20, units = "in", dpi = 500)
+
+# Update processing log
+cat(step_str,"analysis finished:", format(Sys.time()), "\n\n", file = log_file, append = TRUE)

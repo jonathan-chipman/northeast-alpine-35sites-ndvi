@@ -1,0 +1,8 @@
+SubRegion,n_sites,pct_az_higher,pct_significant,mean_az_ndvi,mean_usaz_ndvi,mean_difference,median_difference
+Adirondack Mountains,5,20,100,0.304,0.31,-0.006,-0.006
+Baxter State Park,2,0,100,0.289,0.331,-0.042,-0.042
+Green Mountains,2,0,100,0.293,0.333,-0.04,-0.04
+Longfellow Mountains,4,0,100,0.308,0.342,-0.034,-0.034
+Monts Chic-Chocs,4,25,100,0.31,0.321,-0.012,-0.012
+Monts McGerrigle,13,7.7,100,0.278,0.314,-0.035,-0.035
+White Mountains,5,20,80,0.291,0.33,-0.039,-0.039

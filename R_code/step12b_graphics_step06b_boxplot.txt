@@ -1,0 +1,70 @@
+library(tidyverse)
+library(scales)  # for percent formatting
+
+# Variables to set
+ndvi_metric <- "max"  # choose "max" or "mean" 
+sp_order <- c("NY+VT", "NH", "ME", "QC")
+
+# Load your trend analysis results (adjust file path if needed)
+trend_file <- file.path("output", paste0("step06_trend_analysis_results_", ndvi_metric, ".csv"))
+trend_data <- read_csv(trend_file)
+
+# Load site info file with SP column
+site_info <- read_csv("35sites_info.csv") %>%
+  mutate(site_id = paste0(SP, "_", Site))
+
+# Prepare and join data: select needed columns & calculate % change
+plot_data <- trend_data %>%
+  filter(zone %in% c("AZ", "USAZ")) %>%
+  select(site_id, zone, start_ndvi, end_ndvi) %>%
+  mutate(percent_change = 100 * (end_ndvi - start_ndvi) / start_ndvi) %>%
+  left_join(site_info %>% select(site_id, SP), by = "site_id")
+
+# Combine VT into NY for plotting
+plot_data <- plot_data %>%
+  mutate(SP = if_else(((SP == "VT") | (SP == "NY")), "NY+VT", SP),
+         SP = factor(SP, levels = sp_order))  # convert to factor for ordering in plot
+
+# Define color for zones (optional)
+color_fill_az <- rgb(189, 159, 66, maxColorValue = 255, alpha = 200)    # more opaque tan
+color_fill_usaz <- rgb(76, 129, 56, maxColorValue = 255, alpha = 200)   # more opaque green
+
+# Define y axis text
+y_axis_text <- paste("Change in seasonal",ndvi_metric,"NDVI")
+
+# Create side-by-side box plots with facets by zone
+p <- ggplot(plot_data, aes(x = SP, y = percent_change, fill = zone)) +
+  geom_boxplot(alpha = 0.75, outlier.size = 2) +
+  geom_hline(yintercept = 0, color = "black", linetype = "solid", size = 0.3) + 
+  facet_wrap(~ zone, scales = "free_x") +
+  scale_fill_manual(values = c("AZ" = color_fill_az, "USAZ" = color_fill_usaz)) +
+  scale_y_continuous(labels = function(x) paste0(x, "%"),
+                     limits = c(min(plot_data$percent_change, na.rm = TRUE) - 5,
+                                max(plot_data$percent_change, na.rm = TRUE) + 5),
+                     name = y_axis_text) +
+#  labs(x = "State / Province",
+#       title = "NDVI Change by State/Province and Zone (1984–2024)") +
+  labs(x = "State / Province") +
+  theme_minimal(base_size = 18) +
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(angle = 0, hjust = 0.5),
+    legend.position = "none",
+    strip.background = element_rect(fill = "gray90", color = NA),
+    strip.text = element_text(size = 16, face = "bold")
+  )
+
+# Save figure
+figures_dir <- file.path("output", "figures")
+if (!dir.exists(figures_dir)) dir.create(figures_dir)
+
+outfile <- file.path(figures_dir, paste0("ndvi_change_boxplot_", ndvi_metric, ".png"))
+ggsave(outfile, p, width = 10, height = 6, dpi = 500)
+
+cat("Saved NDVI change box plot to", outfile, "\n")
+
+# Or print to display in R session
+print(p)

@@ -1,0 +1,538 @@
+// Earth Engine script "AlpineZone_NDVI_ecocomm" v4 (2025-07-20)
+// Jonathan W. Chipman, Department of Geography
+// Dartmouth College, Hanover NH USA
+// 
+// With contributions from (in chronological order)
+//   Jenny Vazquez Torres, Irene Ko, Onome Ofoman
+
+// Mann-Kendall trend analysis from N. Clinton, here:
+// https://developers.google.com/earth-engine/tutorials/community/nonparametric-trends
+//
+// Revised to handle inter-satellite calibration and other improvements
+// Revised to allow site-specific code to be edited at the top
+//
+// This code processes Landsat TM, ETM+, and OLI imagery for analysis of
+//   NDVI trends and phenology in ecological communities within the 
+//   alpine zones of northeastern North America.
+
+
+
+// *** EDIT THIS PARAMETER FOR EACH SITE
+var siteName = "ME_KAT";
+var ecoPolys = ME_KAT_EcoPolys;
+var siteFolder = siteName + "_EcoComm_v4";
+
+// Before running this, be sure the above folder exists somewhere on your drive
+// E.g., "NH_PRE_EcoComm_v4"
+
+
+// *** EDIT THESE PARAMETERS AS NEEDED
+var siteScale = 30;                     // Scale in meters for output GeoTIFFs
+var cloud_score = 25;                   // Max acceptable image-wide cloud threshold
+var start_month = 6;                    // Starting month for useable images (June)
+var end_month = 9;                      // Ending month for useable images (September)
+var startDateEarly = "1984-01-01";      // Start of first decade, for averaging
+var endDateEarly = "1993-12-31";        // End of first decade, for averaging
+var startDateLate = "2015-01-01";       // Start of last decade, for averaging
+var endDateLate = "2024-12-31";         // End of last decade, for averaging
+var startYear = 1984;                   // Start year for Mann-Kendall trend
+var endYear = 2024;                     // End year for Mann-Kendall trend
+var doAdjustNDVI = true;                // Adjust NDVI for older satellites?
+
+
+
+
+
+// Assume the first two characters are the state or province abbreviation
+var stateProvince = siteName.substring(0,2);
+
+// Construct variables based on this
+var azName = siteName + "_AZ";
+var usazName = siteName + "_USAZ";
+var timeSeriesAZ_all = "NDVI_timeseries_AZ_all"
+var timeSeriesAZ_pc50 = "NDVI_timeseries_AZ_pc50"
+var timeSeriesUSAZ_all = "NDVI_timeseries_USAZ_all"
+var timeSeriesUSAZ_pc50 = "NDVI_timeseries_USAZ_pc50"
+var nameKendallGeoTIFF = "kendall";
+var nameSignificantGeoTIFF = "kendall_significant";
+var namePvalGeoTIFF = "kendall_pval";
+var nameChangeGeoTIFF = "NDVI_change";
+var nameMeanGeoTIFF = "mean_allbands";
+var nameEarlyGeoTIFF = "NDVI_early";
+var nameLateGeoTIFF = "NDVI_late";
+var nameNdviGeoTIFF = "NDVI_mean";
+var namePositiveGeoTIFF = "kendall_positive";
+var nameNegativeGeoTIFF = "kendall_negative";
+var nameValidCountGeoTIFF = "valid_count";
+
+// Determine the appropriate UTM zone and CRS
+var siteCRS;
+switch(stateProvince) {
+  case "NY": siteCRS = 'EPSG:32618';
+    break;
+  case "VT": siteCRS = 'EPSG:32618';
+    break;
+  case "NH": siteCRS = 'EPSG:32619';
+    break;
+  case "ME": siteCRS = 'EPSG:32619';
+    break;
+  case "QC": siteCRS = 'EPSG:32619';
+    break;
+  case "NL": siteCRS = 'EPSG:32621';
+    break;
+  default: siteCRS = 'EPSG:32619';
+} 
+
+var alpineZone = ee.FeatureCollection(AZ_all)
+  .filter(ee.Filter.eq("SiteZone", azName))
+  .geometry();
+var usaz = ee.FeatureCollection(USAZ_all)
+  .filter(ee.Filter.eq("SiteZone", usazName))
+  .geometry();
+  
+var alpineZoneBounds = alpineZone.bounds(); // rectangle
+var usazBounds = usaz.bounds(); // rectangle
+
+// Combine study_area boundaries (rectangle) and buffer by 500m
+var study_area = alpineZoneBounds.union(usazBounds, 1).buffer(500).bounds(); 
+
+
+// Note: 
+//   NH_PRE has spaces before and after hyphens in all of the following names
+//   ME_KAT does NOT have spaces before and after hyphens
+//   NH_FRA does NOT have spaces, and does not have any Fellfield or Cushion classes
+
+print(ecoPolys);
+
+
+var birch = ee.FeatureCollection(ecoPolys)
+  .filter(ee.Filter.or(
+    ee.Filter.eq("NAME", 'Birch-Alder'),
+    ee.Filter.eq("NAME", 'Birch - Alder')
+  )).geometry();  
+var cliff = ee.FeatureCollection(ecoPolys)
+  .filter(ee.Filter.eq("NAME", 'Cliff'))
+  .geometry();
+var cushion = ee.FeatureCollection(ecoPolys)
+  .filter(ee.Filter.or(
+    ee.Filter.eq("NAME", 'Cushion-Tussock'),
+    ee.Filter.eq("NAME", 'Cushion - Tussock')
+  )).geometry();  
+var fellfield = ee.FeatureCollection(ecoPolys)
+  .filter(ee.Filter.eq("NAME", 'Fellfield'))
+  .geometry();
+var heath = ee.FeatureCollection(ecoPolys)
+  .filter(ee.Filter.or(
+    ee.Filter.eq("NAME", 'Heath Shrub-Rush'),
+    ee.Filter.eq("NAME", 'Heath Shrub - Rush')
+  )).geometry();
+var krummholz = ee.FeatureCollection(ecoPolys)
+  .filter(ee.Filter.eq("NAME", 'Krummholz'))
+  .geometry();
+var sedge = ee.FeatureCollection(ecoPolys)
+  .filter(ee.Filter.eq("NAME", 'Sedge Meadow'))
+  .geometry();
+  
+var ecoList = [
+  birch,
+  cliff,
+  cushion,
+  fellfield,
+  heath,
+  krummholz,
+  sedge
+];
+
+var ecoNames = [
+  "birch",
+  "cliff",
+  "cushion",
+  "fellfield",
+  "heath",
+  "krummholz",
+  "sedge"
+];
+
+
+
+
+
+
+// Add boundaries to map
+Map.addLayer(study_area, null, 'StudyArea');
+Map.addLayer(alpineZone, null, 'AlpineZone');
+Map.addLayer(usaz, null, 'USAZ');
+
+// Brings map to center
+Map.centerObject(study_area, 11);
+
+
+
+// Filter Landsat data
+// (see definitions at top of code for start and end months, and cloud score)
+var allImages5 = ee.ImageCollection(Landsat5_SR
+  .filterMetadata("CLOUD_COVER", "less_than", cloud_score)
+  .filter(ee.Filter.calendarRange(start_month, end_month, 'month'))  
+  .filter(ee.Filter.calendarRange(startYear, endYear, 'year'))  
+  .filterBounds(study_area));
+var allImages7 = ee.ImageCollection(Landsat7_SR
+  .filterMetadata("CLOUD_COVER", "less_than", cloud_score)
+  .filter(ee.Filter.calendarRange(start_month, end_month, 'month'))  
+  .filter(ee.Filter.calendarRange(startYear, endYear, 'year'))
+  .filterBounds(study_area));
+var allImages8 = ee.ImageCollection(Landsat8_SR
+  .filterMetadata("CLOUD_COVER", "less_than", cloud_score)
+  .filter(ee.Filter.calendarRange(start_month, end_month, 'month'))  
+  .filter(ee.Filter.calendarRange(startYear, endYear, 'year'))  
+  .filterBounds(study_area));
+var allImages9 = ee.ImageCollection(Landsat9_SR
+  .filterMetadata("CLOUD_COVER", "less_than", cloud_score)
+  .filter(ee.Filter.calendarRange(start_month, end_month, 'month'))  
+  .filter(ee.Filter.calendarRange(startYear, endYear, 'year'))  
+  .filterBounds(study_area));
+  
+// Count the number of images by each satellite
+var count5 = allImages5.size();
+print("Landsat-5 images: ", count5);
+var count7 = allImages7.size();
+print("Landsat-7 images: ", count7);
+var count8 = allImages8.size();
+print("Landsat-8 images: ", count8);
+var count9 = allImages9.size();
+print("Landsat-9 images: ", count9);
+
+// Rename Landsat bands (5 and 7, vs 8 and 9)
+var rename5_7 = function(myImage) {
+  var img = myImage.select(['SR_B1','SR_B2','SR_B3','SR_B4','SR_B5','SR_B7','QA_PIXEL','QA_RADSAT'])
+    .rename(['B','G','R','NIR','SWIR1','SWIR2','QA_PIXEL','QA_RADSAT']);
+  return img
+};
+// Rename Landsat 8 and Landsat 9 bands
+var rename8_9 = function(myImage) {
+  var img = myImage.select(['SR_B2','SR_B3','SR_B4','SR_B5','SR_B6','SR_B7','QA_PIXEL','QA_RADSAT'])
+    .rename(['B','G','R','NIR','SWIR1','SWIR2','QA_PIXEL','QA_RADSAT']);
+  return img
+};
+var renamed5 = allImages5.map(rename5_7);
+var renamed7 = allImages7.map(rename5_7);
+var renamed8 = allImages8.map(rename8_9);
+var renamed9 = allImages9.map(rename8_9);
+
+
+// Calculate NDVI, and adjust it for inter-satellite calibration differences if requested
+// These differences were empirically calculated based on comparison of pairs of
+//    images from 12 alpine zone sites, taken 1 day apart, by different satellites.
+
+// Add a new band for NDVI (unadjusted)
+var addNDVI = function(myImage) {
+  var NDVI = myImage.normalizedDifference(["NIR","R"]).double();
+  return myImage
+  .addBands(NDVI.rename('NDVI'));
+};
+
+if (doAdjustNDVI) {
+  // Add a new band for NDVI (adjusted) on L5
+  var addNDVI2_L5 = function(myImage) {
+    var NDVI2 = myImage.expression(
+      '0.976238332314974 * NDVI + 0.0262850594231641', {
+        'NDVI': myImage.select('NDVI').double()
+    });
+    return myImage
+    .addBands(NDVI2.rename('NDVI2'));
+  };
+  
+  // Add a new band for NDVI (adjusted) on L7
+  var addNDVI2_L7 = function(myImage) {
+    var NDVI2 = myImage.expression(
+      '0.970326287711007 * NDVI + 0.0197365816580834', {
+        'NDVI': myImage.select('NDVI').double()
+    });
+    return myImage
+    .addBands(NDVI2.rename('NDVI2'));
+  };
+  
+  // Add a new band for NDVI (adjusted) on L8
+  var addNDVI2_L8 = function(myImage) {
+    var NDVI2 = myImage.expression(
+      '1.01336159433426 * NDVI + 0.0023880504434606', {
+        'NDVI': myImage.select('NDVI').double()
+    });
+    return myImage
+    .addBands(NDVI2.rename('NDVI2'));
+  };
+
+  // Add a new band for NDVI (no adjustment needed) on L9
+  var addNDVI2_L9 = function(myImage) {
+    var NDVI2 = myImage.select('NDVI').double();
+    return myImage
+    .addBands(NDVI2.rename('NDVI2'));
+  };
+} // End of optional calculation of adjusted NDVI
+
+
+
+// Calculate NDSI, and adjust it for inter-satellite calibration differences
+// These differences were empirically calculated based on comparison of pairs of
+//    images from 12 alpine zone sites, taken 1 day apart, by different satellites.
+
+//Add a new band for NDSI (unadjusted)
+var addNDSI = function(myImage) {
+  var NDSI = myImage.normalizedDifference(["G","SWIR1"]).double();
+  return myImage
+  .addBands(NDSI.rename('NDSI'));
+};
+
+//Add a new band for NDSI2 (adjusted) on L5
+var addNDSI2_L5 = function(myImage) {
+  var NDSI2 = myImage.expression(
+    '1.18184922361351 * NDSI + 0.0343116464413973', {
+      'NDSI': myImage.select('NDSI').double()
+  });
+  return myImage
+  .addBands(NDSI2.rename('NDSI2'));
+};
+
+//Add a new band for NDSI2 (adjusted) on L7
+var addNDSI2_L7 = function(myImage) {
+  var NDSI2 = myImage.expression(
+    '1.18298794458194 * NDSI + 0.0386808931915994', {
+      'NDSI': myImage.select('NDSI').double()
+  });
+  return myImage
+  .addBands(NDSI2.rename('NDSI2'));
+};
+
+//Add a new band for NDSI2 (adjusted) on L8
+var addNDSI2_L8 = function(myImage) {
+  var NDSI2 = myImage.expression(
+    '1.01336159433426 * NDSI + 0.0023880504434606', {
+      'NDSI': myImage.select('NDSI').double()
+  });
+  return myImage
+  .addBands(NDSI2.rename('NDSI2'));
+};
+
+//Add a new band for NDSI2 (no adjustment needed) on L9
+var addNDSI2_L9 = function(myImage) {
+  var NDSI2 = myImage.select('NDSI').double();
+  return myImage
+  .addBands(NDSI2.rename('NDSI2'));
+};
+
+
+
+// Apply various masks to remove non-usable image pixels
+
+// Mask images to remove clouds and saturated detector artifacts
+// For conservatism, apply a 2-pixel-wide buffer around masked areas
+var doMask_Cloud = function(myImage) {
+  // Bit 0 = Fill
+  // Bit 1 = Dilated Cloud
+  // Bit 2 = Cirrus (Landsat-8 only)
+  // Bit 3 = Cloud
+  // Bit 4 = Cloud Shadow
+  var qaMask = myImage
+    .clip(study_area).select('QA_PIXEL')
+    .bitwiseAnd(parseInt('11111',2)).neq(0);
+  var saturationMask = myImage
+    .clip(study_area).select('QA_RADSAT').neq(0);
+  var badPix = qaMask.or(saturationMask);
+  var badPixBuffer = badPix.focal_max({
+    radius: 60,
+    kernelType: 'circle',
+    units:'meters',
+    iterations: 1
+  });
+  var comboMask = badPixBuffer.eq(0); // get everything that is NOT bad
+  var imgMasked = myImage.updateMask(comboMask);
+  return imgMasked;
+};
+
+
+// Mask images to remove water bodies
+// For conservatism, apply a 2-pixel-wide buffer around masked areas
+var doMask_Water = function (myImage) {
+  var water = JRC_Water.select('max_extent').clip(study_area).eq(1);
+  var waterBuffer = water.focal_max({
+    radius: 60,
+    kernelType: 'circle',
+    units:'meters',
+    iterations: 1
+  });
+  var waterMask = waterBuffer.eq(0); // get everything that is NOT water
+  var imgMasked = myImage.updateMask(waterMask);
+  return imgMasked;
+};
+  
+  
+// Mask images to remove snow
+// Note this uses the adjusted NDSI; assumes values > 0 are problematic
+var doMask_Snow = function(myImage) {
+  var NDSI2 = myImage.select('NDSI2');
+  var snowMask = NDSI2.lt(0.0);
+  var imgMasked = myImage.updateMask(snowMask);
+  return imgMasked;
+};
+
+
+//Add a new band for PixelCount
+// This gets done at the end of the following sequence, after all masks
+var addPixelCount = function(myImage) {
+  var n = myImage.select('NDVI');
+  var pc = n.gt(-99);
+  return myImage
+  .addBands(pc.rename('PixelCount'));
+};
+
+
+if (doAdjustNDVI) {
+  // Actually do the index calculations and apply the masks
+  var clearImages5 = renamed5.map(addNDVI).map(addNDSI).map(addNDSI2_L5).map(addNDVI2_L5)
+    .map(doMask_Cloud).map(doMask_Water).map(doMask_Snow).map(addPixelCount);
+  var clearImages7 = renamed7.map(addNDVI).map(addNDSI).map(addNDSI2_L7).map(addNDVI2_L7)
+    .map(doMask_Cloud).map(doMask_Water).map(doMask_Snow).map(addPixelCount);
+  var clearImages8 = renamed8.map(addNDVI).map(addNDSI).map(addNDSI2_L8).map(addNDVI2_L8)
+    .map(doMask_Cloud).map(doMask_Water).map(doMask_Snow).map(addPixelCount);
+  var clearImages9 = renamed9.map(addNDVI).map(addNDSI).map(addNDSI2_L9).map(addNDVI2_L9)
+    .map(doMask_Cloud).map(doMask_Water).map(doMask_Snow).map(addPixelCount);
+  
+  // Merge the images from all satellites
+  var clearImgs1 = clearImages5.merge(clearImages7).merge(clearImages8).merge(clearImages9);
+  
+  // Rename recalibrated NDVI and NDSI bands (and drop the original versions)
+  var renameNDVI_NDSI = function(myImage) {
+    var img = myImage.select(['B','G','R','NIR','SWIR1','SWIR2','QA_PIXEL','QA_RADSAT','NDSI2','NDVI2', 'PixelCount'])
+      .rename(['B','G','R','NIR','SWIR1','SWIR2','QA_PIXEL','QA_RADSAT','NDSI','NDVI', 'PixelCount']);
+    return img;
+  };
+  var clearImages = clearImgs1.map(renameNDVI_NDSI);
+} // End of section for optional NDVI adjustment = true
+
+else {
+  // Actually do the index calculations and apply the masks
+  var clearImages5 = renamed5.map(addNDVI).map(addNDSI).map(addNDSI2_L5)
+    .map(doMask_Cloud).map(doMask_Water).map(doMask_Snow).map(addPixelCount);
+  var clearImages7 = renamed7.map(addNDVI).map(addNDSI).map(addNDSI2_L7)
+    .map(doMask_Cloud).map(doMask_Water).map(doMask_Snow).map(addPixelCount);
+  var clearImages8 = renamed8.map(addNDVI).map(addNDSI).map(addNDSI2_L8)
+    .map(doMask_Cloud).map(doMask_Water).map(doMask_Snow).map(addPixelCount);
+  var clearImages9 = renamed9.map(addNDVI).map(addNDSI).map(addNDSI2_L9)
+    .map(doMask_Cloud).map(doMask_Water).map(doMask_Snow).map(addPixelCount);
+  
+  // Merge the images from all satellites
+  var clearImgs1 = clearImages5.merge(clearImages7).merge(clearImages8).merge(clearImages9);
+  
+  // Rename recalibrated NDVI and NDSI bands (and drop the original versions)
+  var rename_NDSI = function(myImage) {
+    var img = myImage.select(['B','G','R','NIR','SWIR1','SWIR2','QA_PIXEL','QA_RADSAT','NDSI2', 'NDVI', 'PixelCount'])
+      .rename(['B','G','R','NIR','SWIR1','SWIR2','QA_PIXEL','QA_RADSAT','NDSI', 'NDVI', 'PixelCount']);
+    return img;
+  };
+  var clearImages = clearImgs1.map(rename_NDSI);
+} // End of section for optional NDVI adjustment = false
+
+
+
+// Compute time series for EcoPolys, and export them as CSV files
+// As part of this process, calculate the % of valid pixels on each date
+
+
+
+// Loop over each of seven ecological communities
+for (var i=0;i<7;i++) {
+  print(ecoList[i])
+  print(ecoNames[i])
+  
+  var currGeometry=ecoList[i];
+  var currFName = siteName + "_eco_" + ecoNames[i];
+
+
+
+  // Calculate time series of mean NDVI for entire Alpine Zone
+  var doReduceRegion = function(myImage) {
+    var mean = myImage.reduceRegion({
+      geometry:currGeometry, 
+      reducer:ee.Reducer.mean(), 
+      scale:siteScale
+    });
+    
+    var date = myImage.date().format();
+    var meanNDVI = mean.get('NDVI');
+    var satellite = myImage.get('SPACECRAFT_ID');
+    var path = myImage.get('WRS_PATH');
+    var row = myImage.get('WRS_ROW');
+    var date2 = myImage.get('DATE_ACQUIRED');    
+    return ee.Feature(null)
+    .set('date',date)
+    .set('meanNDVI',meanNDVI)
+    .set('satellite',satellite)
+    .set('path',path)
+    .set('row',row)
+    .set('date2',date2);
+  }; // End of function doReduceRegion
+  
+  // Map the function and delete any rows with nulls from the output
+  var statsAZ_ndvi = ee.FeatureCollection(clearImages.select('NDVI').map(doReduceRegion));
+  var filteredAZ_ndvi = statsAZ_ndvi.filter(ee.Filter.neq('meanNDVI', null));
+  
+  // Calculate time series of valid pixel counts for entire Alpine Zone
+  var doReduceRegion_PC = function(myImage) {
+    var sum = myImage.reduceRegion({
+      geometry:currGeometry, 
+      reducer:ee.Reducer.sum(), 
+      scale:siteScale
+    });
+    
+    var date = myImage.date().format();
+    var sumPixelCount = sum.get('PixelCount');
+    var satellite = myImage.get('SPACECRAFT_ID');
+    var path = myImage.get('WRS_PATH');
+    var row = myImage.get('WRS_ROW');
+    var date2 = myImage.get('DATE_ACQUIRED');    
+    return ee.Feature(null)
+    .set('date',date)
+    .set('sumPixelCount',sumPixelCount)
+    .set('satellite',satellite)
+    .set('path',path)
+    .set('row',row)
+    .set('date2',date2);
+  }; // End of function doReduceRegion_PC
+  
+  // Map the function and delete any rows with nulls or zeros from the output
+  var statsAZ_pc = ee.FeatureCollection(clearImages.select('PixelCount').map(doReduceRegion_PC));
+  var filtered1 = statsAZ_pc.filter(ee.Filter.neq('sumPixelCount', null));
+  var filteredAZ_pc = filtered1.filter(ee.Filter.neq('sumPixelCount', 0));
+  
+  // Join the tables for mean NDVI and valid pixel count
+  var innerJoin = ee.Join.inner();
+  
+  // Specify an equals filter for image timestamps.
+  var filterTimeEq = ee.Filter.equals({
+    leftField: 'date',
+    rightField: 'date'
+  });
+  
+  // Join the NDVI and pixel count tables for AZ
+  var innerJoinedAZ = innerJoin.apply(filteredAZ_ndvi, filteredAZ_pc, filterTimeEq);
+  
+  // Calculate percent coverage of valid pixels for AZ
+  var statsAZ_pc_max = statsAZ_pc.aggregate_max('sumPixelCount');
+  var calcPctValid = function(feature) {
+    var pc = feature.getNumber('secondary.sumPixelCount');
+    var pctValid = pc.divide(statsAZ_pc_max);
+    return feature.set('pctValid',pctValid);
+  };
+  var filteredAZ_all = innerJoinedAZ.map(calcPctValid);
+  
+  // Select only records with at least 50% valid pixels
+  var filteredAZ_pc50 = filteredAZ_all.filter(ee.Filter.gte('pctValid', 0.5));
+  
+  Export.table.toDrive({
+    collection: ee.FeatureCollection(filteredAZ_pc50),
+    folder: siteFolder,
+    fileNamePrefix: currFName,
+    fileFormat: 'csv',
+    selectors: ['primary.date', 'primary.date2', 'primary.satellite', 'primary.path', 'primary.row', 'primary.meanNDVI', 'pctValid'],
+  });
+
+}

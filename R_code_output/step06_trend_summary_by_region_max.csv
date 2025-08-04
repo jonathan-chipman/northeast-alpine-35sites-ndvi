@@ -1,0 +1,15 @@
+zone,SubRegion,n_sites,pct_increasing,pct_decreasing,pct_no_trend,median_total_change,mean_total_change,median_change_per_decade,mean_change_per_decade
+AZ,Adirondack Mountains,5,100,0,0,0.03084,0.02835,0.0077,0.0071
+AZ,Baxter State Park,2,100,0,0,0.02616,0.02616,0.0065,0.0065
+AZ,Green Mountains,2,0,0,100,0.00499,0.00499,0.0012,0.0012
+AZ,Longfellow Mountains,4,100,0,0,0.02602,0.02556,0.0065,0.0064
+AZ,Monts Chic-Chocs,4,25,0,75,0.01327,0.0101,0.0033,0.0025
+AZ,Monts McGerrigle,13,30.8,0,69.2,0.0119,0.00975,0.003,0.0024
+AZ,White Mountains,5,100,0,0,0.03032,0.02844,0.0076,0.0071
+USAZ,Adirondack Mountains,5,80,0,20,0.0262,0.02431,0.0065,0.0061
+USAZ,Baxter State Park,2,100,0,0,0.02603,0.02603,0.0065,0.0065
+USAZ,Green Mountains,2,0,50,50,-0.01278,-0.01278,-0.0032,-0.0032
+USAZ,Longfellow Mountains,4,0,0,100,0.00579,0.00554,0.0014,0.0014
+USAZ,Monts Chic-Chocs,4,0,25,75,-0.00617,-0.0095,-0.0015,-0.0024
+USAZ,Monts McGerrigle,13,0,46.2,53.8,-0.01881,-0.02504,-0.0047,-0.0063
+USAZ,White Mountains,5,0,0,100,5e-4,-0.00374,1e-4,-9e-4

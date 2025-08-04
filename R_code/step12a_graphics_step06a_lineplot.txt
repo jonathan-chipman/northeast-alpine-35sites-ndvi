@@ -1,0 +1,101 @@
+library(tidyverse)
+
+# Choose the ndvi metric to plot (max or mean)
+ndvi_metric <- "max"
+
+# Choose the LOESS span (should be same as elsewhere
+loess_span_val <- 0.75
+
+# Load annual NDVI data for trends
+annual_for_trends <- read_csv(file.path("output", "step05_annual_for_trends.csv"))
+
+# Combine VT into NY in the SP column
+annual_for_trends <- annual_for_trends %>%
+  mutate(SP = if_else(((SP == "VT") | (SP == "NY")), "NY+VT", SP))
+
+# Filter zones of interest
+annual_for_trends <- annual_for_trends %>%
+  filter(zone %in% c("AZ", "USAZ"))
+
+# Define years span for predictions
+prediction_years <- tibble(year = 1984:2024)
+
+if (ndvi_metric == "max") {
+  my_ndvi_col <- "ndvi_annual_deseason_max"
+} else {
+  my_ndvi_col <- "ndvi_annual_deseason_mean"
+}
+
+# Your existing LOESS fitting function (adjusted here to export fitted lines)
+fit_loess_predict <- function(df, ndvi_col = my_ndvi_col, span_val = loess_span_val) {
+  if (nrow(df) < 8) {
+    return(tibble(year = integer(), fit = double()))
+  }
+  loess_mod <- loess(as.formula(paste(ndvi_col, "~ year")), 
+                     data = df, span = span_val, control = loess.control(surface = "direct"),
+                     weights = df$weight_factor)
+  preds <- predict(loess_mod, newdata = prediction_years, se = FALSE)
+  tibble(year = prediction_years$year, fit = preds)
+}
+
+# Generate fits per site, zone, SP
+fits_site <- annual_for_trends %>%
+  group_by(site_id, zone, SP) %>%
+  nest() %>%
+  mutate(fit_df = map(data, ~ fit_loess_predict(.x))) %>%
+  select(-data) %>%
+  unnest(fit_df)
+
+# Calculate median and spread per SP, zone, and year
+fits_summary <- fits_site %>%
+  group_by(SP, zone, year) %>%
+  summarise(
+    median_fit = median(fit, na.rm = TRUE),
+    lower_fit = quantile(fit, 0.25, na.rm = TRUE),
+    upper_fit = quantile(fit, 0.75, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Define pastel colors consistently for SP groups (NY+VT, NH, ME, QC)
+sp_levels <- c("NY+VT", "NH", "ME", "QC")
+fits_summary$SP <- factor(fits_summary$SP, levels = sp_levels)
+fits_site$SP <- factor(fits_site$SP, levels = sp_levels)
+
+pastel_colors <- c(
+  "NY+VT" = "#AEC6CF",    # pastel blue
+  "NH" = "#FFB347",    # pastel orange
+  "ME" = "#77DD77",    # pastel green
+  "QC" = "#CBAACB"     # pastel purple
+)
+
+y_axis_text <- paste("LOESS trend NDVI",ndvi_metric)
+
+# Plot: median lines + ribbon for spread, two panels (AZ, USAZ)
+p <- ggplot() +
+  geom_ribbon(data = fits_summary,
+              aes(x = year, ymin = lower_fit, ymax = upper_fit, fill = SP),
+              alpha = 0.3) +
+  geom_line(data = fits_summary,
+            aes(x = year, y = median_fit, color = SP), size = 1.2) +
+  facet_wrap(~ zone, nrow = 1) +
+  scale_color_manual(values = pastel_colors) +
+  scale_fill_manual(values = pastel_colors) +
+  scale_x_continuous(breaks = seq(1985, 2025, 10), limits = c(1984, 2024)) +
+  labs(x = "Year", y = y_axis_text,
+       color = "State/Province", fill = "State/Province") +
+  theme_minimal(base_size = 16) +
+  theme(
+    legend.position = c(0.77, 0.3),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),  # show axis lines in black
+    strip.background = element_rect(fill = "gray90"),
+    strip.text = element_text(face = "bold")
+  )
+
+# Save or display plot as needed
+outfile <- paste("output/figures/ndvi_",ndvi_metric,"_loess_trends_by_SP.png")
+ggsave(outfile, p, width = 8, height = 4, dpi = 500)
+print(p)

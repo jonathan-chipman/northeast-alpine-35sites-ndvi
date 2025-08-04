@@ -1,0 +1,267 @@
+# Alpine zone project - data processing script
+#   Workflow for ecological communities
+# Step 08: Robustness Checks - Observation Frequency Bias
+#
+# Jonathan W. Chipman, Dartmouth College
+# Written with the assistance of Claude 4 Sonnet AI and GPT 4.1
+# Updated 2025-06-27 (updated for consistent full vs balanced linear trend comparison)
+
+# Reads output/eco05_annual_for_trends.csv
+# Writes output/eco08_observation_frequency_bias.csv
+# Writes output/eco08_full_vs_balanced_comparison.csv
+# Writes output/eco08_early_vs_late_period_comparison.csv
+# Writes output/eco08_loess_sensitivity_analysis.csv
+
+# Set current step number
+step_str <- "Step 08"
+step_txt <- "Robustness Checks - Observation Frequency Bias"
+
+# Required libraries
+library(tidyverse)
+library(broom)
+
+# Set working directory and input
+setwd("D:/alpine_zone")
+analysis_data_in <- "eco05_annual_for_trends.csv"
+
+# Set output file info
+log_file <- "eco_processing_log.txt"
+output_dir <- "eco_output"
+obs_freq_bias_out <- "eco08_observation_frequency_bias.csv"
+balanced_results_out <- "eco08_balanced_subsample_results.csv"
+full_vs_balanced_out <- "eco08_full_vs_balanced_comparison.csv" 
+early_vs_late_out <- "eco08_early_vs_late_period_comparison.csv" 
+loess_out <- "eco08_loess_sensitivity_analysis.csv" 
+
+# Initialize log file
+cat(step_str, step_txt, "\n", file = log_file, append = TRUE)
+cat("Analysis started:", format(Sys.time()), "\n", file = log_file, append = TRUE)
+
+# Read input annual data
+annual_for_trends <- read_csv(file.path(output_dir, analysis_data_in))
+
+# === Observation frequency bias assessment ===
+cat("=== OBSERVATION FREQUENCY BIAS ASSESSMENT ===\n")
+
+obs_frequency_bias <- annual_for_trends %>%
+  group_by(site_id, zone) %>%
+  filter(n() >= 10) %>%
+  summarise(
+    obs_vs_ndvi_mean = cor(n_obs, ndvi_annual_deseason_mean, use = "complete.obs"),
+    obs_vs_ndvi_max = cor(n_obs, ndvi_annual_deseason_max, use = "complete.obs"),
+    year_vs_obs = cor(year, n_obs, use = "complete.obs"),
+    n_years = n(),
+    mean_obs_per_year = mean(n_obs),
+    min_obs_per_year = min(n_obs),
+    max_obs_per_year = max(n_obs),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    potential_obs_bias_mean = abs(obs_vs_ndvi_mean) > 0.4 & year_vs_obs > 0.3,
+    potential_obs_bias_max = abs(obs_vs_ndvi_max) > 0.4 & year_vs_obs > 0.3
+  )
+
+write_csv(obs_frequency_bias, file.path(output_dir, obs_freq_bias_out))
+
+# === Balanced subsample and full-vs-balanced linear trend comparison ===
+
+# Define midpoint of study period based on data
+mid_year <- floor((min(annual_for_trends$year, na.rm = TRUE) + max(annual_for_trends$year, na.rm = TRUE)) / 2)
+
+# Identify sites/zones with balanced data: years with 3-6 observations and ≥5 years in each half of period
+balanced_years_summary <- annual_for_trends %>%
+  filter(n_obs >= 3, n_obs <= 6) %>%
+  mutate(period = if_else(year <= mid_year, "Early", "Late")) %>%
+  group_by(site_id, zone) %>%
+  summarise(
+    n_years_early = sum(period == "Early"),
+    n_years_late = sum(period == "Late"),
+    .groups = "drop"
+  ) %>%
+  filter(n_years_early >= 5 & n_years_late >= 5)
+
+# Function to fit linear trend and extract slope, p-value, significance
+fit_trend <- function(data, ndvi_col) {
+  if(nrow(data) < 5) return(tibble(slope = NA_real_, p_value = NA_real_, signif = NA))
+  model <- lm(as.formula(paste(ndvi_col, "~ year")), data = data)
+  tidy_mod <- broom::tidy(model)
+  slope_row <- tidy_mod %>% filter(term == "year")
+  tibble(
+    slope = slope_row$estimate,
+    p_value = slope_row$p.value,
+    signif = slope_row$p.value < 0.05
+  )
+}
+
+# For each site and zone subset, calculate full vs balanced trends and comparisons
+full_vs_balanced_trends <- balanced_years_summary %>%
+  select(site_id, zone) %>%
+  rowwise() %>%
+  do({
+    site_zone <- .
+    site_data <- annual_for_trends %>%
+      filter(site_id == site_zone$site_id, zone == site_zone$zone)
+
+    balanced_data <- site_data %>%
+      filter(n_obs >= 3, n_obs <= 6) %>%
+      arrange(year)
+
+    # Define comparison window based on balanced data years
+    start_year <- min(balanced_data$year)
+    end_year <- max(balanced_data$year)
+
+    # Data window for full and balanced datasets
+    full_window_data <- site_data %>%
+      filter(year >= start_year, year <= end_year)
+    balanced_window_data <- balanced_data %>%
+      filter(year >= start_year, year <= end_year)
+
+    # Count years included in each dataset
+    full_years_n <- n_distinct(full_window_data$year)
+    balanced_years_n <- n_distinct(balanced_window_data$year)
+
+    # Fit linear trends for all NDVI metrics on full data
+    full_raw <- fit_trend(full_window_data, "ndvi_annual_raw") %>% rename_with(~paste0("full_", ., "_raw"))
+    full_mean <- fit_trend(full_window_data, "ndvi_annual_deseason_mean") %>% rename_with(~paste0("full_", ., "_mean"))
+    full_max <- fit_trend(full_window_data, "ndvi_annual_deseason_max") %>% rename_with(~paste0("full_", ., "_max"))
+
+    # Fit linear trends for all NDVI metrics on balanced data
+    balanced_raw <- fit_trend(balanced_window_data, "ndvi_annual_raw") %>% rename_with(~paste0("balanced_", ., "_raw"))
+    balanced_mean <- fit_trend(balanced_window_data, "ndvi_annual_deseason_mean") %>% rename_with(~paste0("balanced_", ., "_mean"))
+    balanced_max <- fit_trend(balanced_window_data, "ndvi_annual_deseason_max") %>% rename_with(~paste0("balanced_", ., "_max"))
+
+    # Assemble results tibble for this site/zone
+    res <- tibble(
+      site_id = site_zone$site_id,
+      zone = site_zone$zone,
+      start_year = start_year,
+      end_year = end_year,
+      full_years_n = full_years_n,
+      balanced_years_n = balanced_years_n
+    ) %>%
+      bind_cols(full_raw, full_mean, full_max, balanced_raw, balanced_mean, balanced_max)
+
+    # Add columns for direction agreement and absolute slope differences per metric
+    res %>%
+      mutate(
+        direction_agreement_raw = sign(full_slope_raw) == sign(balanced_slope_raw),
+        direction_agreement_mean = sign(full_slope_mean) == sign(balanced_slope_mean),
+        direction_agreement_max = sign(full_slope_max) == sign(balanced_slope_max),
+        trend_difference_raw = abs(full_slope_raw - balanced_slope_raw),
+        trend_difference_mean = abs(full_slope_mean - balanced_slope_mean),
+        trend_difference_max = abs(full_slope_max - balanced_slope_max)
+      )
+  }) %>%
+  ungroup()
+
+# Write the full vs balanced comparison table CSV to output directory
+write_csv(full_vs_balanced_trends, file.path(output_dir, full_vs_balanced_out))
+
+# Print summary stats for the agreement, trend differences, and correlations by NDVI metric
+if (nrow(full_vs_balanced_trends) > 0) {
+  cat("\nTrend comparison summary (Mean NDVI):\n")
+  comparison_summary_mean <- full_vs_balanced_trends %>%
+    summarise(
+      n_comparisons = n(),
+      direction_agreement_pct_mean = round(mean(direction_agreement_mean, na.rm = TRUE) * 100, 1),
+      mean_trend_difference_mean = round(mean(trend_difference_mean, na.rm = TRUE), 4),
+      correlation_mean = round(cor(full_slope_mean, balanced_slope_mean, use = "complete.obs"), 3)
+    )
+  print(comparison_summary_mean)
+
+  cat("\nTrend comparison summary (Max NDVI):\n")
+  comparison_summary_max <- full_vs_balanced_trends %>%
+    summarise(
+      n_comparisons = n(),
+      direction_agreement_pct_max = round(mean(direction_agreement_max, na.rm = TRUE) * 100, 1),
+      mean_trend_difference_max = round(mean(trend_difference_max, na.rm = TRUE), 4),
+      correlation_max = round(cor(full_slope_max, balanced_slope_max, use = "complete.obs"), 3)
+    )
+  print(comparison_summary_max)
+
+  cat("\nTrend comparison summary (Raw NDVI):\n")
+  comparison_summary_raw <- full_vs_balanced_trends %>%
+    summarise(
+      n_comparisons = n(),
+      direction_agreement_pct_raw = round(mean(direction_agreement_raw, na.rm = TRUE) * 100, 1),
+      mean_trend_difference_raw = round(mean(trend_difference_raw, na.rm = TRUE), 4),
+      correlation_raw = round(cor(full_slope_raw, balanced_slope_raw, use = "complete.obs"), 3)
+    )
+  print(comparison_summary_raw)
+} else {
+  cat("No sites meet criteria for balanced subsample trend comparison.\n")
+}
+
+cat("Full vs balanced linear trend comparison completed.\n")
+
+# === Early vs Late period comparison ===
+period_comparison <- annual_for_trends %>%
+  mutate(
+    period = case_when(
+      year <= mid_year ~ "Early",
+      year >= (mid_year + 1) ~ "Late"
+    )
+  ) %>%
+  group_by(site_id, zone, period) %>%
+  summarise(
+    mean_ndvi_mean = mean(ndvi_annual_deseason_mean, na.rm = TRUE),
+    mean_ndvi_max = mean(ndvi_annual_deseason_max, na.rm = TRUE),
+    mean_obs_per_year = mean(n_obs),
+    n_years = n(),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(names_from = period, values_from = c(mean_ndvi_mean, mean_ndvi_max, mean_obs_per_year, n_years)) %>%
+  mutate(
+    period_ndvi_difference_mean = mean_ndvi_mean_Late - mean_ndvi_mean_Early,
+    period_ndvi_difference_max = mean_ndvi_max_Late - mean_ndvi_max_Early,
+    obs_change = mean_obs_per_year_Late - mean_obs_per_year_Early
+  ) %>%
+  filter(!is.na(period_ndvi_difference_mean) & !is.na(period_ndvi_difference_max))
+
+write_csv(period_comparison, file.path(output_dir, early_vs_late_out))
+
+# === Sensitivity analysis with different LOESS spans ===
+sensitivity_spans <- c(0.3, 0.4, 0.5, 0.6, 0.7, 0.8)
+
+compute_sensitivity <- function(ndvi_col) {
+  bind_rows(lapply(sensitivity_spans, function(span_val) {
+    annual_for_trends %>%
+      group_by(site_id, zone) %>%
+      filter(n() >= 8) %>%
+      nest() %>%
+      mutate(
+        span = span_val,
+        change_per_decade = map_dbl(data, ~{
+          tryCatch({
+            loess_fit <- loess(as.formula(paste(ndvi_col, "~ year")), data = .x, span = span_val)
+            years_range <- c(min(.x$year), max(.x$year))
+            pred_endpoints <- predict(loess_fit, data.frame(year = years_range))
+            (pred_endpoints[2] - pred_endpoints[1]) / (years_range[2] - years_range[1]) * 10
+          }, error = function(e) NA_real_)
+        })
+      ) %>%
+      select(site_id, zone, span, change_per_decade)
+  }))
+}
+
+sensitivity_mean <- compute_sensitivity("ndvi_annual_deseason_mean") %>%
+  pivot_wider(names_from = span, values_from = change_per_decade, names_prefix = "mean_span_")
+
+sensitivity_max <- compute_sensitivity("ndvi_annual_deseason_max") %>%
+  pivot_wider(names_from = span, values_from = change_per_decade, names_prefix = "max_span_")
+
+sensitivity_analysis_wide <- sensitivity_mean %>%
+  left_join(sensitivity_max, by = c("site_id", "zone"))
+
+write_csv(sensitivity_analysis_wide, file.path(output_dir, loess_out))
+
+# Print summaries and log completion
+cat("Sites with potential observation frequency bias:\n")
+bias_sites <- filter(obs_frequency_bias, potential_obs_bias_mean | potential_obs_bias_max)
+cat("Number of sites flagged:", nrow(bias_sites), "\n")
+if (nrow(bias_sites) > 0) {
+  print(select(bias_sites, site_id, zone, obs_vs_ndvi_mean, obs_vs_ndvi_max, year_vs_obs))
+}
+
+# Update processing log
+cat(step_str, "analysis finished:", format(Sys.time()), "\n\n", file = log_file, append = TRUE)

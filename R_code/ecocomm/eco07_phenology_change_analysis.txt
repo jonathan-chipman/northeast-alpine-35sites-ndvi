@@ -1,0 +1,280 @@
+# Alpine zone project - data processing script
+#   Workflow for ecological communities
+# Step 07: Phenological Change Analysis
+#
+# Jonathan W. Chipman, Dartmouth College
+# Written with the assistance of Claude 4 Sonnet AI and GPT 4.1
+# Updated 2025-06-27
+
+# Reads output/step02_analysis_data_prepared.csv (from Steps 02 and 03)
+# Reads output/step04_phenological_model_summary.csv (from Step 04)
+
+# Writes output/eco07_phenological_metrics.csv - values of extracted metrics
+# Writes output/eco07_phenological_changes_start_end.csv - magnitude of change over time
+# Writes output/eco07_bootstrapped_predictions_[site_id] - only if run_single_site == TRUE 
+#
+# Warning! When run for all sites (instead of a single site) this takes a long time to run.
+#  (2 sites x 7 zones x 100 iterations of GAM = 1400 model fits from observations)
+
+# Set current step number
+step_str <- "Step 07"
+step_txt <- "Phenological Change Analysis"
+
+# Parameters - adjust as needed
+# For testing with just a single site:
+   run_single_site <- FALSE  # set FALSE to run all sites
+   single_site_id <- "NH_PRE"
+   single_zone <- "heath"
+# For tensor product smoothing (k) of GAM model:
+# Be sure to use the same values as in Step 04 earlier
+   k_doy_final <- 4
+   k_year_final <- 8
+# Bootstrap iterations
+   n_bootstrap <- 100
+# Time period to include (years, and days of year)
+   start_year <- 1984
+   end_year <- 2024
+   start_doy <- 152
+   end_doy <- 273
+
+# Required libraries
+library(tidyverse)
+library(mgcv)  # for gam()
+
+# Set working directory and input
+setwd("D:/alpine_zone")
+analysis_data_in <- "eco02_analysis_data_prepared.csv"
+model_summary_in <- "eco04_phenological_model_summary.csv"
+
+# Set output file info
+log_file <- "eco_processing_log.txt"
+output_dir <- "eco_output"
+phenological_metrics_out <- "eco07_phenological_metrics.csv"
+phenological_changes_out <- "eco07_phenological_changes_start_end.csv"
+site_basename <- "eco07_bootstrapped_predictions_" # Will have suffixes appended for site ID and zone
+
+# Initialize log file
+cat(step_str, step_txt, "\n", file = log_file, append = TRUE)
+cat("Analysis started:", format(Sys.time()), "\n", file = log_file, append = TRUE)
+
+# Read input data
+analysis_data <- read_csv(file.path(output_dir, analysis_data_in))
+model_summary <- read_csv(file.path(output_dir, model_summary_in))
+
+# If running a single site, filter the data now
+if (run_single_site) {
+  analysis_data <- analysis_data %>%
+    filter(site_id == single_site_id, zone == single_zone)
+  model_summary <- model_summary %>%
+    filter(site_id == single_site_id, zone == single_zone)
+}
+
+# Assuming analysis_data contains raw NDVI observations:
+# site_id, zone, year, doy, ndvi (and any metadata needed)
+
+# Function to extract phenological metrics from GAM predictions with bootstrap
+# This version only extracts peak DOY, peak NDVI, and seasonal mean NDVI
+extract_phenological_metrics <- function(site_data, 
+                                         years_to_predict = c(start_year, end_year), 
+                                         n_boot = n_bootstrap) {
+  if (nrow(site_data) < 20) {
+    # Return empty tibble with expected columns if not enough data
+    return(tibble(
+      year = integer(),
+      peak_doy = numeric(), peak_doy_low = numeric(), peak_doy_high = numeric(),
+      peak_ndvi = numeric(), peak_ndvi_low = numeric(), peak_ndvi_high = numeric(),
+      seasonal_mean_ndvi = numeric(), seasonal_mean_ndvi_low = numeric(), seasonal_mean_ndvi_high = numeric()
+    ))
+  }
+  
+  doy_seq <- seq(start_doy, end_doy, by = 1)  # daily predictions for precision
+  
+  # Set up the prediction grid ... days x years
+  pred_grid <- expand_grid(
+    doy = doy_seq,
+    year = years_to_predict
+  )
+  
+  boot_metric_list <- vector("list", n_boot)
+  # For single site prediction output (store bootstrapped predictions for start/end years)
+  # This will only be used if run_single_site==TRUE outside
+  
+  boot_pred_list <- vector("list", n_boot)
+  
+  for (b in seq_len(n_boot)) {
+    # Bootstrap resample entire site data with replacement
+    boot_sample <- site_data %>% slice_sample(prop = 1, replace = TRUE)
+    
+    # Try fitting GAM model for this replicate
+    boot_gam <- tryCatch({
+      gam(ndvi ~ te(doy, year, k = c(k_doy_final, k_year_final)), 
+          data = boot_sample, method = "REML")
+    }, error = function(e) { NULL })
+    
+    if (is.null(boot_gam)) {
+      # NA results for this bootstrap replicate
+      boot_metric_list[[b]] <- tibble(
+        year = years_to_predict,
+        peak_doy = NA_real_,
+        peak_ndvi = NA_real_,
+        seasonal_mean_ndvi = NA_real_
+      )
+      # Store NA predictions as well
+      boot_pred_list[[b]] <- tibble(
+        doy = rep(doy_seq, length(years_to_predict)),
+        year = rep(years_to_predict, each = length(doy_seq)),
+        predicted_ndvi = NA_real_
+      )
+      next
+    }
+    
+    # Predict NDVI daily for the two endpoint years
+    pred_grid$predicted_ndvi <- predict(boot_gam, pred_grid)
+    
+    # Extract metrics per year
+    metrics <- pred_grid %>%
+      group_by(year) %>%
+      summarise(
+        peak_doy = doy[which.max(predicted_ndvi)],
+        peak_ndvi = max(predicted_ndvi),
+        seasonal_mean_ndvi = mean(predicted_ndvi),
+        .groups = "drop"
+      )
+    
+    boot_metric_list[[b]] <- metrics
+    
+    # Store prediction grid results for this bootstrap (needed only if single site)
+    boot_pred_list[[b]] <- pred_grid
+  }
+  
+  # Combine bootstrap metric results
+  metrics_all <- bind_rows(boot_metric_list, .id = "bootstrap") %>% 
+    mutate(bootstrap = as.integer(bootstrap))
+  
+  # Summarize metrics over bootstrap replicates to get median and 95% CI
+  metrics_summary <- metrics_all %>%
+    group_by(year) %>%
+    summarise(
+      median_peak_doy = median(peak_doy, na.rm = TRUE),
+      low_peak_doy = quantile(peak_doy, 0.025, na.rm = TRUE),
+      high_peak_doy = quantile(peak_doy, 0.975, na.rm = TRUE),
+      
+      median_peak_ndvi = median(peak_ndvi, na.rm = TRUE),
+      low_peak_ndvi = quantile(peak_ndvi, 0.025, na.rm = TRUE),
+      high_peak_ndvi = quantile(peak_ndvi, 0.975, na.rm = TRUE),
+      
+      median_seasonal_mean_ndvi = median(seasonal_mean_ndvi, na.rm = TRUE),
+      low_seasonal_mean_ndvi = quantile(seasonal_mean_ndvi, 0.025, na.rm = TRUE),
+      high_seasonal_mean_ndvi = quantile(seasonal_mean_ndvi, 0.975, na.rm = TRUE),
+      .groups = "drop"
+    )
+    
+  # Store boot_pred_list as an attribute for optional downstream use (single site)
+  attr(metrics_summary, "boot_predictions") <- boot_pred_list
+  attr(metrics_summary, "doy_seq") <- doy_seq
+  attr(metrics_summary, "years_predicted") <- years_to_predict
+  
+  return(metrics_summary)
+}
+
+cat("Extracting phenological metrics...\n")
+
+# Only analyze sites with successful models
+successful_sites <- filter(model_summary, model_success)
+
+# Filter analysis_data by successful sites
+analysis_filtered <- semi_join(analysis_data, successful_sites, by = c("site_id", "zone"))
+
+# Group, nest, and extract metrics with bootstrapping for all sites or single site
+phenological_metrics <- analysis_filtered %>%
+  group_by(site_id, zone, SP, SubRegion, Elevation_m, 
+           elevation_relative, az_size_class) %>%
+  nest() %>%
+  mutate(
+    pheno_metrics = map(data, extract_phenological_metrics)
+  ) %>%
+  select(-data) %>%
+  unnest(pheno_metrics) %>%
+  filter(!is.na(median_peak_doy))
+
+# Calculate difference (change) in metrics between end and start years per site-zone group,
+# with uncertainty from the bootstrap CIs
+metrics_start_end <- phenological_metrics %>%
+  select(site_id, zone, SP, SubRegion, Elevation_m, elevation_relative, az_size_class,
+         year, median_peak_doy, low_peak_doy, high_peak_doy,
+         median_peak_ndvi, low_peak_ndvi, high_peak_ndvi,
+         median_seasonal_mean_ndvi, low_seasonal_mean_ndvi, high_seasonal_mean_ndvi) %>%
+  pivot_wider(names_from = year, values_from = c(median_peak_doy, low_peak_doy, high_peak_doy,
+                                                 median_peak_ndvi, low_peak_ndvi, high_peak_ndvi,
+                                                 median_seasonal_mean_ndvi, low_seasonal_mean_ndvi, high_seasonal_mean_ndvi),
+              names_sep = "_") %>%
+  # Calculate change = end year - start year for median estimates
+  # We can also add approximate significance by checking if 95% CI for difference overlaps zero
+  # (More rigorous significance would require bootstrap of difference directly,
+  # but this is a practical heuristic)
+  
+  mutate(
+    peak_doy_change = .data[[paste0("median_peak_doy_", end_year)]] - .data[[paste0("median_peak_doy_", start_year)]],
+    peak_ndvi_change = .data[[paste0("median_peak_ndvi_", end_year)]] - .data[[paste0("median_peak_ndvi_", start_year)]],
+    seasonal_mean_ndvi_change = .data[[paste0("median_seasonal_mean_ndvi_", end_year)]] - .data[[paste0("median_seasonal_mean_ndvi_", start_year)]],
+    
+    peak_doy_significant = !(
+      .data[[paste0("low_peak_doy_", start_year)]] <= .data[[paste0("high_peak_doy_", end_year)]] &
+        .data[[paste0("low_peak_doy_", end_year)]] <= .data[[paste0("high_peak_doy_", start_year)]]
+    ),
+    peak_ndvi_significant = !(
+      .data[[paste0("low_peak_ndvi_", start_year)]] <= .data[[paste0("high_peak_ndvi_", end_year)]] &
+        .data[[paste0("low_peak_ndvi_", end_year)]] <= .data[[paste0("high_peak_ndvi_", start_year)]]
+    ),
+    seasonal_mean_ndvi_significant = !(
+      .data[[paste0("low_seasonal_mean_ndvi_", start_year)]] <= .data[[paste0("high_seasonal_mean_ndvi_", end_year)]] &
+        .data[[paste0("low_seasonal_mean_ndvi_", end_year)]] <= .data[[paste0("high_seasonal_mean_ndvi_", start_year)]]
+    )
+  )
+
+# Save metrics summary to CSV
+write_csv(phenological_metrics, file.path(output_dir, phenological_metrics_out))
+
+# Save start-end summary with changes and significance
+write_csv(metrics_start_end, file.path(output_dir, phenological_changes_out))
+
+# If running for a single site, output a new table with bootstrapped predictions
+if (run_single_site && nrow(phenological_metrics) == length(c(start_year, end_year))) {
+  # Extract the metrics summary object with boot predictions from pheno_metrics attribute
+  # We must find it within the nested results to get boot_preds for this single site
+  
+  # Nested data for single site:
+  single_site_data <- analysis_filtered %>%
+    filter(site_id == single_site_id, zone == single_zone) %>%
+    nest() %>%
+    mutate(pheno_metrics = map(data, extract_phenological_metrics)) %>%
+    pull(pheno_metrics) %>%
+    .[[1]]
+  
+  boot_pred_list <- attr(single_site_data, "boot_predictions")
+  doy_seq <- attr(single_site_data, "doy_seq")
+  years_predicted <- attr(single_site_data, "years_predicted")
+  
+  # For each year, combine boot predictions per day into a summary table with median and 2.5% & 97.5% quantiles
+  combined_preds <- bind_rows(boot_pred_list, .id = "bootstrap") %>%
+    mutate(bootstrap = as.integer(bootstrap)) %>%
+    group_by(year, doy) %>%
+    summarise(
+      ndvi_median = median(predicted_ndvi, na.rm = TRUE),
+      ndvi_low = quantile(predicted_ndvi, 0.025, na.rm = TRUE),
+      ndvi_high = quantile(predicted_ndvi, 0.975, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    pivot_wider(names_from = year,
+                values_from = c(ndvi_median, ndvi_low, ndvi_high),
+                names_sep = "_")
+  
+  # Save this table
+  pred_outfile <- file.path(output_dir, paste0(site_basename, "_", single_site_id, "_", single_zone, ".csv"))
+  write_csv(combined_preds, pred_outfile)
+}
+
+cat("Phenological analysis completed for", n_distinct(phenological_metrics$site_id), "site-zone combinations\n")
+
+# Update processing log
+cat(step_str,"analysis finished:", format(Sys.time()), "\n\n", file = log_file, append = TRUE)

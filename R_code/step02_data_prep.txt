@@ -1,0 +1,225 @@
+# Alpine zone project - data processing script
+# Step 02: Data Preparation and Quality Assessment
+#
+# Jonathan W. Chipman, Dartmouth College
+# Written with the assistance of Claude 4 Sonnet AI
+# Updated 2025-06-24
+
+# Reads output/step01_analysis_file.csv (from Step 01)
+
+# Writes output/step02_analysis_data_prepared.csv with updated data for processing
+# Writes output/step02_coverage_summary.csv with summary of images per decade by subregion
+# Writes output/step02_site_summary.csv with summary of images per decade by site
+
+# It also writes the following modified versions of the above to the output "tables" folder:
+#   coverage_by_site.csv
+#   coverage_by_subregion.csv
+
+# Set current step number
+step_str <- "Step 02"
+step_txt <- "Data Preparation and Quality Assessment"
+
+# Required libraries
+library(tidyverse)
+
+# Set working directory and paths
+setwd("D:/alpine_zone")
+analysis_file <- "step01_analysis_file.csv"
+
+# Set output file info
+log_file <- "processing_log.txt"
+output_dir <- "output"
+analysis_out <- "step02_analysis_data_prepared.csv"
+coverage_summary_out <- "step02_coverage_summary.csv"
+site_summary_out <- "step02_site_summary.csv"
+
+# Additional outputs to output tables folder
+coverage_by_site_table <- "coverage_by_site.csv"
+coverage_by_subregion_table <- "coverage_by_subregion.csv"
+
+# Initialize log file
+cat(step_str, step_txt, "\n", file = log_file, append = TRUE)
+cat("Analysis started:", format(Sys.time()), "\n", file = log_file, append = TRUE)
+
+# Read input data
+analysis_data <- read_csv(file.path(output_dir, analysis_file))
+
+# Create analysis variables
+analysis_data <- analysis_data %>%
+  mutate(
+    year = year(date),
+    doy = yday(date),
+    decade = case_when(
+      year >= 1980 & year <= 1989 ~ "1980s",
+      year >= 1990 & year <= 1999 ~ "1990s", 
+      year >= 2000 & year <= 2009 ~ "2000s",
+      year >= 2010 & year <= 2019 ~ "2010s",
+      year >= 2020 ~ "2020s"
+    ),
+    # Elevation relative to mean of subregion (relative elevation)
+    elevation_relative = NA_real_,
+    # AZ area classes
+    az_size_class = cut(Area_AZ_ha, 
+                        breaks = c(0, 100, 1000, Inf),
+                        labels = c("Small", "Medium", "Large")),
+  )
+
+# Calculate relative elevation within subregions
+subregion_elevations <- analysis_data %>%
+  distinct(site_id, SubRegion, Elevation_m) %>%
+  group_by(SubRegion) %>%
+  summarise(mean_elevation = mean(Elevation_m, na.rm = TRUE), .groups = "drop")
+
+analysis_data <- analysis_data %>%
+  left_join(subregion_elevations, by = "SubRegion") %>%
+  mutate(elevation_relative = Elevation_m - mean_elevation) %>%
+  select(-mean_elevation)
+
+# Quality filtering confirmation
+analysis_data <- analysis_data %>%
+  filter(pct_valid >= 0.5)
+
+# Generate data coverage summary
+coverage_summary <- analysis_data %>%
+  group_by(SubRegion, zone, decade) %>%
+  summarise(
+    n_sites = n_distinct(site_id),
+    n_observations = n(),
+    obs_per_site_per_year = round(n() / (n_distinct(site_id) * n_distinct(year)), 1),
+    mean_pct_valid = round(mean(pct_valid, na.rm = TRUE), 2),
+    .groups = "drop"
+  )
+
+# Site-level summary
+site_summary <- analysis_data %>%
+  group_by(site_id, zone) %>%
+  summarise(
+    n_years = n_distinct(year),
+    n_observations = n(),
+    first_year = min(year),
+    last_year = max(year),
+    obs_per_year = round(n_observations / n_years, 1),
+    .groups = "drop"
+  )
+
+# Save results
+write_csv(analysis_data, file.path(output_dir, analysis_out))
+write_csv(coverage_summary, file.path(output_dir, coverage_summary_out))
+write_csv(site_summary, file.path(output_dir, site_summary_out))
+
+# Print summary to console and log
+cat("Data preparation complete\n")
+cat("Coverage by subregion and decade:\n")
+print(coverage_summary)
+
+# Export two files to the "tables" folder
+
+# Update processing log
+cat("Writing summary tables to output tables folder\n", file = log_file, append = TRUE)
+
+# Create 'tables' directory inside output if it doesn't exist
+tables_dir <- file.path(output_dir, "tables")
+if (!dir.exists(tables_dir)) dir.create(tables_dir)
+
+# Filter data to AZ zone only
+analysis_az <- analysis_data %>% 
+  filter(zone == "AZ")
+
+# Helper: Calculate mean observations per year by decade per group - site level
+decade_obs_site <- analysis_az %>%
+  group_by(site_id, decade, year) %>%
+  summarise(n_obs_year = n(), .groups = "drop") %>%
+  group_by(site_id, decade) %>%
+  summarise(mean_obs_per_year = mean(n_obs_year), .groups = "drop")
+
+# Pivot decade-wise mean observations to wide format for sites and round
+site_decades_wide <- decade_obs_site %>%
+  pivot_wider(names_from = decade, values_from = mean_obs_per_year, values_fill = 0) %>%
+  mutate(across(`1980s`:`2020s`, ~round(.x, 1)))
+
+# Calculate Valid%_All and Valid%_589 and other stats - site level
+site_valid_pct <- analysis_az %>%
+  group_by(site_id) %>%
+  summarise(
+    N_Years = n_distinct(year),
+    N_Obs = n(),
+    Valid_pct_All = mean(pct_valid, na.rm = TRUE),
+    Valid_pct_589 = mean(pct_valid[satellite != "LANDSAT_7"], na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Combine site summaries with decade data and reorder columns
+coverage_by_site <- site_valid_pct %>%
+  left_join(site_decades_wide, by = "site_id") %>%
+  select(site_id, N_Years, N_Obs, 
+         `1980s`, `1990s`, `2000s`, `2010s`, `2020s`,
+         Valid_pct_All, Valid_pct_589) %>%
+  rename(
+    Site_ID = site_id,
+    `Valid%_All` = Valid_pct_All,
+    `Valid%_589` = Valid_pct_589
+  )
+
+# Save coverage_by_site.csv
+write_csv(coverage_by_site, file.path(tables_dir, coverage_by_site_table))
+
+# ---- Subregion-level ----
+
+# Count number of distinct sites per SubRegion
+subregion_sites <- analysis_az %>%
+  group_by(SubRegion) %>%
+  summarise(N_Sites = n_distinct(site_id), .groups = "drop")
+
+# Calculate mean observations per year by decade per SubRegion and year
+decade_obs_subregion <- analysis_az %>%
+  group_by(SubRegion, decade, year) %>%
+  summarise(n_obs_year = n(), .groups = "drop") %>%
+  # Calculate mean observations per year per SubRegion and decade
+  group_by(SubRegion, decade) %>%
+  summarise(mean_obs_per_year = mean(n_obs_year), .groups = "drop")
+
+# Join number of sites per SubRegion so we can calculate per site per year means
+decade_obs_subregion <- decade_obs_subregion %>%
+  left_join(subregion_sites, by = "SubRegion") %>%
+  mutate(
+    mean_obs_per_year = mean_obs_per_year / N_Sites
+  )
+
+# Pivot decade-wise means to wide, round to 1 decimal place
+subregion_decades_wide <- decade_obs_subregion %>%
+  select(-N_Sites) %>% # Remove N_Sites before pivot
+  pivot_wider(names_from = decade, values_from = mean_obs_per_year, values_fill = 0) %>%
+  mutate(across(`1980s`:`2020s`, ~round(.x, 1)))
+
+# Calculate Valid%_All and Valid%_589, N_Years and N_Obs per SubRegion
+subregion_valid_pct <- analysis_az %>%
+  group_by(SubRegion) %>%
+  summarise(
+    N_Years = n_distinct(year),
+    N_Obs = n(),
+    Valid_pct_All = mean(pct_valid, na.rm = TRUE),
+    Valid_pct_589 = mean(pct_valid[satellite != "LANDSAT_7"], na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(subregion_sites, by = "SubRegion") %>%
+  mutate(
+    Obs_per_site = N_Obs / N_Sites
+  )
+
+# Combine all into final subregion dataframe
+coverage_by_subregion <- subregion_valid_pct %>%
+  select(SubRegion, N_Sites, N_Years, Obs_per_site, Valid_pct_All, Valid_pct_589) %>%
+  left_join(subregion_decades_wide, by = "SubRegion") %>%
+  select(SubRegion, N_Sites, N_Years, Obs_per_site,
+         `1980s`, `1990s`, `2000s`, `2010s`, `2020s`,
+         Valid_pct_All, Valid_pct_589) %>%
+  rename(
+    `Valid%_All` = Valid_pct_All,
+    `Valid%_589` = Valid_pct_589
+  )
+
+# Save coverage_by_subregion.csv
+write_csv(coverage_by_subregion, file.path(tables_dir, coverage_by_subregion_table))
+
+# Update processing log
+cat(step_str,"analysis finished:", format(Sys.time()), "\n\n", file = log_file, append = TRUE)

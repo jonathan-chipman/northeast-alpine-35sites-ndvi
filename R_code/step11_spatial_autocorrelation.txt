@@ -1,0 +1,241 @@
+# Alpine zone project - data processing script
+# Step 11: Spatial Autocorrelation Analysis
+#
+# Jonathan W. Chipman, Dartmouth College
+# Written with the assistance of Claude 4 Sonnet AI and GPT 4.1
+# Updated 2025-06-27
+#
+# Reads:
+#   step06_trend_analysis_results_mean.csv
+#   step06_trend_analysis_results_max.csv
+#   step07_phenological_changes_start_end.csv
+#
+# Writes:
+# File numbers in code below
+
+# Settings
+step_str <- "Step 11"
+step_txt <- "Spatial Autocorrelation Analysis"
+
+
+# Required libraries
+library(tidyverse)
+library(spdep)
+library(sp)
+library(nlme)
+
+# Files and working directory
+setwd("D:/alpine_zone")
+output_dir <- "output"
+log_file <- "processing_log.txt"
+
+# Initialize log
+cat(step_str, step_txt, "\n", file = log_file, append = TRUE)
+cat("Analysis started:", format(Sys.time()), "\n", file = log_file, append = TRUE)
+
+# Read site coordinates and prepare site_id
+site_coords <- read_csv(file.path("35sites_info.csv")) %>%
+  mutate(site_id = paste(SP, Site, sep = "_")) %>%
+  select(site_id, Longitude_deg, Latitude_deg) %>%
+  filter(!is.na(Longitude_deg), !is.na(Latitude_deg))
+
+cat("Sites with coordinates:", nrow(site_coords), "\n")
+
+# Read trend data (mean and max), filter successful models
+trend_mean <- read_csv(file.path(output_dir, "step06_trend_analysis_results_mean.csv")) %>%
+  filter(model_success) %>% mutate(ndvi_metric = "mean")
+trend_max <- read_csv(file.path(output_dir, "step06_trend_analysis_results_max.csv")) %>%
+  filter(model_success) %>% mutate(ndvi_metric = "max")
+trend_all <- bind_rows(trend_mean, trend_max)
+
+# Read phenological changes
+phenology_changes <- read_csv(file.path(output_dir, "step07_phenological_changes_start_end.csv"))
+
+# Spatial autocorrelation test function with zone parameter
+test_spatial_autocorrelation_zone <- function(data, coords, variable, ndvi_product, zone_name,
+                                             description, max_dist_km = 500) {
+  data_zone <- data %>% filter(zone == zone_name)
+  spatial_data <- inner_join(data_zone, coords, by = "site_id") %>% filter(!is.na(.data[[variable]]))
+  
+  if (nrow(spatial_data) < 5) {
+    return(tibble(
+      analysis = description,
+      ndvi_metric = ndvi_product,
+      zone = zone_name,
+      n_sites = nrow(spatial_data),
+      moran_i = NA_real_,
+      p_value = NA_real_,
+      significant = FALSE,
+      interpretation = "Insufficient data"
+    ))
+  }
+  
+  tryCatch({
+    coordinates(spatial_data) <- ~Longitude_deg + Latitude_deg
+    proj4string(spatial_data) <- CRS("+proj=longlat +datum=WGS84")
+    nb <- dnearneigh(spatial_data, 0, max_dist_km)
+    if (sum(card(nb)) == 0) {
+      return(tibble(
+        analysis = description,
+        ndvi_metric = ndvi_product,
+        zone = zone_name,
+        n_sites = nrow(spatial_data),
+        moran_i = NA_real_,
+        p_value = NA_real_,
+        significant = FALSE,
+        interpretation = paste0("No spatial neighbors within ", max_dist_km, " km")
+      ))
+    }
+    weights <- nb2listw(nb, style = "W", zero.policy = TRUE)
+    moran_result <- moran.test(spatial_data[[variable]], weights, zero.policy = TRUE)
+    interp <- case_when(
+      moran_result$p.value > 0.05 ~ "No significant spatial autocorrelation",
+      moran_result$estimate[1] > 0.3 ~ "Strong positive spatial autocorrelation",
+      moran_result$estimate[1] > 0.1 ~ "Moderate positive spatial autocorrelation",
+      moran_result$estimate[1] > 0 ~ "Weak positive spatial autocorrelation",
+      TRUE ~ "Negative spatial autocorrelation"
+    )
+    tibble(
+      analysis = description,
+      ndvi_metric = ndvi_product,
+      zone = zone_name,
+      n_sites = nrow(spatial_data),
+      max_distance_km = max_dist_km,
+      n_neighbors_total = sum(card(nb)),
+      moran_i = round(moran_result$estimate[1], 3),
+      expected_i = round(moran_result$estimate[2], 3),
+      p_value = round(moran_result$p.value, 3),
+      significant = moran_result$p.value < 0.05,
+      interpretation = interp
+    )
+  }, error = function(e) {
+    tibble(
+      analysis = description,
+      ndvi_metric = ndvi_product,
+      zone = zone_name,
+      n_sites = nrow(spatial_data),
+      max_distance_km = max_dist_km,
+      moran_i = NA_real_,
+      p_value = NA_real_,
+      significant = FALSE,
+      interpretation = paste("Error:", e$message)
+    )
+  })
+}
+
+cat("Testing spatial autocorrelation per zone...\n")
+
+trend_spatial_results <- map_dfr(unique(trend_all$ndvi_metric), function(md) {
+  data_sub <- filter(trend_all, ndvi_metric == md)
+  bind_rows(
+    test_spatial_autocorrelation_zone(data_sub, site_coords, "change_per_decade", md, "AZ",
+                                     paste(md, "NDVI trend magnitudes AZ")),
+    test_spatial_autocorrelation_zone(data_sub, site_coords, "change_per_decade", md, "USAZ",
+                                     paste(md, "NDVI trend magnitudes USAZ"))
+  )
+})
+
+# Phenology variables to test
+pheno_vars <- c("peak_doy_change", "peak_ndvi_change", "seasonal_mean_ndvi_change")
+
+pheno_spatial_results <- map_dfr(pheno_vars, function(var) {
+  bind_rows(
+    test_spatial_autocorrelation_zone(phenology_changes, site_coords, var, "phenology", "AZ",
+                                     paste("Phenological", var, "changes AZ")),
+    test_spatial_autocorrelation_zone(phenology_changes, site_coords, var, "phenology", "USAZ",
+                                     paste("Phenological", var, "changes USAZ"))
+  )
+})
+
+# Distance-based trend similarity by zone and NDVI metric
+distance_summaries <- list()
+distance_correlations <- list()
+
+for (ndvi_product in c("mean", "max")) {
+  for (zone_name in c("AZ", "USAZ")) {
+    trend_subset <- filter(trend_all, ndvi_metric == ndvi_product, zone == zone_name) %>%
+      inner_join(site_coords, by = "site_id") %>%
+      select(site_id, change_per_decade, Longitude_deg, Latitude_deg)
+    
+    if (nrow(trend_subset) >= 5) {
+      pairwise_analysis <- expand_grid(
+        site1 = trend_subset$site_id,
+        site2 = trend_subset$site_id
+      ) %>%
+        filter(site1 < site2) %>%
+        left_join(trend_subset, by = c("site1" = "site_id")) %>%
+        left_join(trend_subset, by = c("site2" = "site_id"), suffix = c("_1", "_2")) %>%
+        mutate(
+          distance_km = sqrt((Longitude_deg_1 - Longitude_deg_2)^2 + (Latitude_deg_1 - Latitude_deg_2)^2) * 111.32,
+          trend_difference = abs(change_per_decade_1 - change_per_decade_2),
+          distance_category = cut(distance_km, breaks = c(0, 50, 150, 500, Inf),
+                                  labels = c("< 50 km", "50-150 km", "150-500 km", "> 500 km")),
+          ndvi_metric = ndvi_product,
+          zone = zone_name
+        )
+      dist_cor <- cor(pairwise_analysis$distance_km, pairwise_analysis$trend_difference, use = "complete.obs")
+      dist_summary <- pairwise_analysis %>%
+        group_by(distance_category, zone, ndvi_metric) %>%
+        summarise(
+          n_pairs = n(),
+          mean_trend_difference = round(mean(trend_difference, na.rm = TRUE), 4),
+          median_trend_difference = round(median(trend_difference, na.rm = TRUE), 4),
+          .groups = "drop"
+        )
+    } else {
+      dist_cor <- NA_real_
+      dist_summary <- tibble(zone = zone_name,
+                             ndvi_metric = ndvi_product,
+                             distance_category = factor(levels = c("< 50 km", "50-150 km", "150-500 km", "> 500 km")),
+                             n_pairs = 0,
+                             mean_trend_difference = NA_real_,
+                             median_trend_difference = NA_real_)
+    }
+    distance_correlations[[paste(ndvi_product, zone_name, sep = "_")]] <- dist_cor
+    
+    if (exists("distance_summaries_combined")) {
+      distance_summaries_combined <- bind_rows(distance_summaries_combined, dist_summary)
+    } else {
+      distance_summaries_combined <- dist_summary
+    }
+  }
+}
+
+# Write outputs with zone column included
+write_csv(trend_spatial_results, file.path(output_dir, "step11_spatial_autocorrelation_results_trends.csv"))
+write_csv(pheno_spatial_results, file.path(output_dir, "step11_spatial_autocorrelation_results_phenology.csv"))
+write_csv(distance_summaries_combined, file.path(output_dir, "step11_distance_trend_similarity.csv"))
+
+# Summary table of distance-trend correlations by zone and NDVI metric
+spatial_summary <- tibble(
+  ndvi_metric = rep(c("mean", "max"), each = 2),
+  zone = rep(c("AZ", "USAZ"), times = 2),
+  distance_trend_correlation = c(
+    distance_correlations[["mean_AZ"]],
+    distance_correlations[["mean_USAZ"]],
+    distance_correlations[["max_AZ"]],
+    distance_correlations[["max_USAZ"]]
+  )
+) %>%
+  mutate(
+    interpretation = case_when(
+      is.na(distance_trend_correlation) ~ "Insufficient data",
+      abs(distance_trend_correlation) < 0.1 ~ "No relationship between distance and trend similarity",
+      distance_trend_correlation > 0.3 ~ "Strong positive relationship - nearby sites more similar",
+      distance_trend_correlation > 0.1 ~ "Moderate positive relationship",
+      distance_trend_correlation < -0.1 ~ "Negative relationship - nearby sites less similar",
+      TRUE ~ "Weak relationship"
+    )
+  )
+
+write_csv(spatial_summary, file.path(output_dir, "step11_spatial_analysis_summary.csv"))
+
+# Print results
+cat("=== SPATIAL AUTOCORRELATION RESULTS (by Zone) ===\n")
+print(trend_spatial_results)
+print(pheno_spatial_results)
+
+cat("\nDistance-trend similarity correlations by zone and NDVI metric:\n")
+print(spatial_summary)
+# Update processing log
+cat(step_str, "analysis finished:", format(Sys.time()), "\n\n", file = log_file, append = TRUE)

@@ -1,0 +1,175 @@
+# Alpine zone project - data processing script
+# Step 1: Data Import and Integration
+#
+# Jonathan W. Chipman, Dartmouth College
+# Written with the assistance of Claude 4 Sonnet AI
+# Updated 2025-06-24
+
+# Reads 35sites_info.csv (site description table)
+# Reads input/individual CSV files exported from Google Earth Engine
+
+# Writes output/step01_analysis_file.csv with combined data for processing
+
+# Set current step number
+step_str <- "Step 01"
+step_txt <- "Data Import and Integration"
+
+# Required libraries
+library(tidyverse)
+library(lubridate)
+
+# Set working directory and paths
+setwd("D:/alpine_zone")
+input_dir <- "input"
+sites_file <- "35sites_info.csv"
+
+# Input file format: SP_SSS_GEE_v4 (SP = state/province, SSS = site code)
+filesuffix <- "_GEE_v4"
+
+# Set output file info
+log_file <- "processing_log.txt"
+output_dir <- "output"
+analysis_file <- "step01_analysis_file.csv"
+
+# Check to see if output directory exists, and create it if not
+if (!dir.exists(output_dir)) dir.create(output_dir)
+
+# Initialize log file
+writeLines("Alpine Zone Data Processing\n", log_file)
+cat(step_str, step_txt, "\n", file = log_file, append = TRUE)
+cat("Analysis started:", format(Sys.time()), "\n", file = log_file, append = TRUE)
+
+# Read site metadata
+sites_info <- read_csv(sites_file) %>%
+  mutate(site_id = paste(SP, Site, sep = "_")) %>%
+  select(site_id, SP, Site, Name, Latitude_deg, Longitude_deg, 
+         Elevation_m, Area_AZ_ha, Area_USAZ_ha, SubRegion)
+
+cat("Loaded", nrow(sites_info), "sites from metadata file\n", 
+    file = log_file, append = TRUE)
+
+# Function to read NDVI time series files
+read_ndvi_files <- function(input_dir) {
+
+  # Get all state/province directories
+  sp_dirs <- list.dirs(input_dir, recursive = FALSE, full.names = TRUE)
+  
+  # Data will be stored in a "tibble" (tidyverse version of simple data frames)
+  all_data <- tibble()
+  
+  for (sp_dir in sp_dirs) {
+    sp <- basename(sp_dir)
+    
+    # Get all site directories within this SP
+    site_dirs <- list.dirs(sp_dir, recursive = FALSE, full.names = TRUE)
+    
+    # Read data files for each site
+    for (site_dir in site_dirs) {
+      # Extract site code from directory name 
+      dir_name <- basename(site_dir)
+      if (!grepl(paste(filesuffix,"$",sep=""), dir_name)) next
+      
+      site_parts <- str_split(dir_name, "_")[[1]]
+      if (length(site_parts) < 3) next
+      
+      sp_from_dir <- site_parts[1]
+      site_code <- site_parts[2]
+      site_id <- paste(sp_from_dir, site_code, sep = "_")
+      
+      # Look for NDVI files ending in _pc50.csv
+      ndvi_files <- list.files(site_dir, pattern = "_pc50\\.csv$", full.names = TRUE)
+      
+      for (file in ndvi_files) {
+        # Determine zone from filename
+        if (grepl("NDVI_timeseries_AZ_pc50\\.csv$", file)) {
+          zone <- "AZ"
+        } else if (grepl("NDVI_timeseries_USAZ_pc50\\.csv$", file)) {
+          zone <- "USAZ"
+        } else {
+          next  # Skip files that don't match expected pattern
+        }
+        
+        # Read the file
+        tryCatch({
+          file_data <- read_csv(file, show_col_types = FALSE) %>%
+            mutate(
+              site_id = site_id,
+              zone = zone,
+              date = as.Date(primary.date2),
+              ndvi = primary.meanNDVI,
+              pct_valid = pctValid,
+              satellite = primary.satellite,
+              path = primary.path,
+              row = primary.row
+            ) %>%
+            select(site_id, zone, date, ndvi, pct_valid, satellite, path, row)
+          
+          all_data <- bind_rows(all_data, file_data)
+          
+        }, error = function(e) {
+          cat("Error reading", file, ":", e$message, "\n", 
+              file = log_file, append = TRUE)
+        })
+      } # end of loop over files within a site
+    } # end of loop over sites within a state/province
+  } # end of loop over all state/province directories
+  
+  return(all_data)
+} # end of function read_ndvi_files
+
+# Read all NDVI data
+ndvi_data <- read_ndvi_files(input_dir)
+
+cat("Loaded", nrow(ndvi_data), "NDVI observations from time series files\n", 
+    file = log_file, append = TRUE)
+
+# Handle duplicate dates (same site-zone-date)
+# These should only occur for sites in the overlap area between successive
+#   Landsat WRS-2 rows along a single path. The data in both rows should be 
+#   identical in theory, but minor differences can be introduced via the 
+#   Level-2 surface reflectance processing algorithm.
+ndvi_data <- ndvi_data %>%
+  group_by(site_id, zone, date) %>%
+  arrange(desc(pct_valid)) %>%
+  summarise(
+    ndvi = if(n() > 1) {
+      if(pct_valid[1] > pct_valid[2]) ndvi[1] else mean(ndvi)
+    } else ndvi[1],
+    pct_valid = if(n() > 1) {
+      if(pct_valid[1] > pct_valid[2]) pct_valid[1] else mean(pct_valid)
+    } else pct_valid[1],
+    satellite = satellite[1],
+    path = path[1],
+    row = row[1],
+    n_duplicates = n(),
+    .groups = "drop"
+  )
+
+duplicates_removed <- sum(ndvi_data$n_duplicates > 1)
+if (duplicates_removed > 0) {
+  cat("Handled", duplicates_removed, "duplicate date observations\n", 
+      file = log_file, append = TRUE)
+}
+
+# Join with site metadata
+analysis_data <- ndvi_data %>%
+  left_join(sites_info, by = "site_id") %>%
+  filter(!is.na(SP))  # Remove any observations that don't match metadata
+
+# Check to see whether any sites failed to join (match)
+unmatched_sites <- setdiff(unique(ndvi_data$site_id), sites_info$site_id)
+if (length(unmatched_sites) > 0) {
+  cat("Warning: No metadata found for sites:", paste(unmatched_sites, collapse = ", "), "\n",
+      file = log_file, append = TRUE)
+}
+
+# Log results
+cat("Combined dataset:", nrow(analysis_data), "observations from", 
+    length(unique(analysis_data$site_id)), "sites\n",
+    file = log_file, append = TRUE)
+
+# Save joined dataset
+write_csv(analysis_data, file.path(output_dir, analysis_file))
+
+# Update processing log
+cat(step_str,"analysis finished:", format(Sys.time()), "\n\n", file = log_file, append = TRUE)

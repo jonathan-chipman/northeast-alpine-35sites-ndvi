@@ -1,0 +1,148 @@
+# Load required libraries
+library(tidyverse)
+library(scales)  # for percent_format()
+
+# Choose to plot NDVI_mean or NDVI_max
+ndvi_metric <- "max" 
+
+# --- File paths (adjust if needed) ---
+output_dir <- "output"
+trend_file_mean <- file.path(output_dir, "step06_trend_analysis_results_mean.csv")
+trend_file_max <- file.path(output_dir, "step06_trend_analysis_results_max.csv")
+site_info_file <- "35sites_info.csv"
+
+# --- Step 1: Load data ---
+
+# Load trend data (LOESS results)
+if (ndvi_metric == "mean") {
+  trend_data <- read_csv(trend_file_mean)
+} else {
+  trend_data <- read_csv(trend_file_max)
+}
+
+
+# Load site info with SP and Site columns; make site_id by concatenation
+site_info <- read_csv(site_info_file) %>%
+  mutate(site_id = paste0(SP, "_", Site))
+
+# --- Step 2: Prepare and filter trend data ---
+
+# Filter to Alpine and Upper Subalpine zones only
+trend_sel <- trend_data %>%
+  filter(zone %in% c("AZ", "USAZ")) %>%
+  select(site_id, zone, start_ndvi, end_ndvi)
+
+# Calculate % change from 1984 to 2024
+trend_sel <- trend_sel %>%
+  mutate(percent_change = 100 * (end_ndvi - start_ndvi) / start_ndvi)
+
+# --- Step 3: Prepare area data in long format ---
+
+# Reshape site info so we have one row per site and zone with areas
+site_area_long <- site_info %>%
+  select(site_id, Area_AZ_ha, Area_USAZ_ha) %>%
+  pivot_longer(cols = starts_with("area"),
+               names_to = "zone",
+               values_to = "area_ha") %>%
+  mutate(zone = case_when(
+    zone == "Area_AZ_ha" ~ "AZ",
+    zone == "Area_USAZ_ha" ~ "USAZ"
+  ))
+
+# --- Step 4: Join trend and area data ---
+
+plot_data <- trend_sel %>%
+  left_join(site_area_long, by = c("site_id", "zone")) %>%
+  filter(!is.na(area_ha))  # remove rows if area missing
+
+# --- Step 5: Define colors and transparency ---
+
+# Filled colors (with transparency for overlap visibility)
+color_fill_az <- rgb(189, 159, 66, maxColorValue = 255, alpha = 90)    # tan, translucent (~0.35)
+color_fill_usaz <- rgb(76, 129, 56, maxColorValue = 255, alpha = 90)   # green, translucent (~0.35)
+
+# Outline colors (fully opaque)
+color_outline_az <- rgb(158, 130, 44, maxColorValue = 255, alpha = 255)  # darker tan
+color_outline_usaz <- rgb(52, 89, 38, maxColorValue = 255, alpha = 255)  # darker green
+
+# Add columns for fill and outline in data
+plot_data <- plot_data %>%
+  mutate(
+    fill_color = case_when(
+      zone == "AZ" ~ color_fill_az,
+      zone == "USAZ" ~ color_fill_usaz
+    ),
+    outline_color = case_when(
+      zone == "AZ" ~ color_outline_az,
+      zone == "USAZ" ~ color_outline_usaz
+    )
+  )
+
+# --- Step 6: Plotting ---
+
+# Define size breaks for legend bubbles (hectares)
+size_breaks <- c(10, 100, 1000)
+
+library(ggplot2)
+
+p <- ggplot(plot_data, aes(x = start_ndvi, y = percent_change,
+                           size = area_ha,
+                           fill = zone, color = zone)) +
+  geom_hline(yintercept = 0, color = "black", linetype = "dashed") +      # (b) horizontal line
+  
+  geom_point(shape = 21, alpha = 0.35, stroke = 1) +                      # bubbles
+  
+  scale_fill_manual(values = c("AZ" = color_fill_az, "USAZ" = color_fill_usaz),
+                    labels = c("Alpine zone", "Upper subalpine zone"),
+                    name = "Zone") +
+  scale_color_manual(values = c("AZ" = color_outline_az, "USAZ" = color_outline_usaz),
+                     guide = "none") +
+  scale_size_area(max_size = 25, breaks = size_breaks, name = "Area (ha)") +
+  
+  scale_x_continuous(limits = c(0.2, 0.4), breaks = seq(0.2, 0.4, 0.05),   # (d) x-axis from 0.2
+                     name = "1984 NDVI →") +
+  scale_y_continuous(labels = function(x) paste0(x, "%"),
+                     breaks = seq(-20, 20, 5),
+                     limits = c(-20, 20),
+                     name = "Change in NDVI, 1984–2024") +
+  
+  theme_minimal(base_size = 18) +
+  
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),          # (a) white background
+    plot.background = element_rect(fill = "white", color = NA),           # entire graphic white
+    
+    legend.position = c(0.27, 0.2),                                      # (c) legend lower left
+    legend.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks.length = unit(6, "pt"),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 13),
+    legend.key = element_blank()
+  ) +
+  
+  guides(
+    fill = guide_legend(
+      title = "Zone",
+      nrow = 1,
+      override.aes = list(size = 8)                                          # (c) bigger legend circles
+    ),
+    size = guide_legend(title = "Area (ha)", nrow = 1)
+  ) 
+#+
+#  theme(
+#    legend.position = "bottom",
+#    legend.box = "horizontal"
+#  )
+
+
+# --- Step 7: Save the plot ---
+figures_dir <- file.path(output_dir, "figures")
+if(!dir.exists(figures_dir)) dir.create(figures_dir)
+outfile <- paste(figures_dir,"/ndvi_",ndvi_metric,"_bubble.png",sep="")
+
+ggsave(outfile, p, width = 10, height = 8, dpi = 500)
+
+cat("Saved NDVI bubble plot to", outfile, "\n")

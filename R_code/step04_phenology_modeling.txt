@@ -1,0 +1,333 @@
+# Alpine zone project - data processing script
+# Step 04: Phenological Modeling (Time-varying seasonal cycles with NDVI max adj. and LOYO-CV)
+#
+# Jonathan W. Chipman, Dartmouth College
+# Written with the assistance of Claude 4 Sonnet AI and GPT 4.1
+# Updated 2025-06-27
+#
+# Latest Enhancements:
+# (a) Added adjusted NDVI for seasonal max (adj_ndvi_for_max)
+# (b) Added Leave-One-Year-Out cross-validation, writing LOYO-CV results to CSV
+
+# Reads output/step02_analysis_data_prepared.csv (from Steps 02 and 03)
+
+# Writes output/step04_deseasonalized_data.csv - same as input data, but with additional columns for later use
+# Writes output/step04_phenological_model_summary.csv - description of the phenological models
+# Writes output/step04_loyo_cv_results.csv - results of leave-one-year-out cross validation for phenological models
+# Writes output/step04_nh_pre_az_k_iteration_test.csv - testing iterating over values of k for one sample site
+
+# Note:  This outputs the following new columns to the data table ("deseasonalized_data.csv")
+#   seasonal_component: predicted NDVI for that day-of-year in that year, from model
+#   mean_seasonal: predicted mean NDVI for that entire season in that year, from mode
+#   max_seasonal: predicted max NDVI for that entire season in that year, from mode
+#   adj_ndvi_for_mean: observed NDVI on that date, adjusted to compensate for its position in modeled seasonal cycle:
+#       adj_ndvi_for_mean = ndvi - (seasonal component - mean_seasonal)
+#   adj_ndvi_for_max: observed NDVI on that date, adjusted to compensate for its position in modeled seasonal cycle:
+#       adj_ndvi_for_max = ndvi - (seasonal component - max_seasonal)
+# Each adjusted observation is then an estimate of the real-world (not model) seasonal mean or max for that year
+
+# Set current step number
+step_str <- "Step 04"
+step_txt <- "Phenological Modeling (Time-varying seasonal cycles with NDVI max adj. and LOYO-CV)"
+
+# Tensor product smoothing values for the final version of the phenological model:
+k_doy_final <- 4
+k_year_final <- 8    
+
+# Start and end of season for modeling 
+season_start <- 152 # Nominally June 1
+season_end <- 273 # Nominally September 30
+
+# Required libraries
+library(tidyverse)
+library(mgcv)
+library(purrr)
+
+# Set working directory and input
+setwd("D:/alpine_zone")
+analysis_file <- "step02_analysis_data_prepared.csv"
+
+# Set output file info
+log_file <- "processing_log.txt"
+output_dir <- "output"
+deseasonalized_out <- "step04_deseasonalized_data.csv"
+phenological_summary_out <- "step04_phenological_model_summary.csv"
+loyo_results_out <- "step04_loyo_cv_results.csv"
+iteration_test_out <- "step04_nh_pre_az_k_iteration_test.csv"
+
+# Initialize log file
+cat(step_str, step_txt, "\n", file = log_file, append = TRUE)
+cat("Analysis started:", format(Sys.time()), "\n", file = log_file, append = TRUE)
+
+# Read input data
+analysis_data <- read_csv(file.path(output_dir, analysis_file))
+
+# -- Function to fit GAM with specified k --
+fit_gam_with_k <- function(data, k_doy, k_year, min_obs=20) {
+  if (nrow(data) < min_obs) return(NULL)
+  tryCatch({
+    gam(ndvi ~ te(doy, year, k=c(k_doy, k_year)), data=data, method="REML")
+  }, error = function(e) NULL)
+}
+
+# -- Generate seasonal means and max --
+
+cat("Modeling seasonal mean and max by year...\n", file=log_file, append=TRUE)
+
+generate_seasonal_stats <- function(model, data) {
+  if (is.null(model)) return(NULL)
+  years <- unique(data$year)
+  
+  # Define growing season days range
+  season_days <- seq(season_start, season_end)
+  
+  # Create prediction grid for all doy-year combinations
+  pred_grid <- expand_grid(doy = season_days, year = years)
+  
+  # Predict NDVI for each day-year
+  pred_grid <- pred_grid %>%
+    mutate(seasonal_pred = predict(model, newdata = pred_grid))
+  
+  # Convert to numeric to drop attributes that might cause issues
+  pred_grid <- pred_grid %>%
+    mutate(seasonal_pred = as.numeric(seasonal_pred))
+  
+  # Summarize by year to get mean seasonal NDVI, max NDVI, and DOY of max NDVI
+  seasonal_summary <- pred_grid %>%
+    group_by(year) %>%
+    summarise(
+      mean_seasonal = mean(seasonal_pred, na.rm = TRUE),
+      max_seasonal = max(seasonal_pred, na.rm = TRUE),
+      doy_max_seasonal = doy[which.max(seasonal_pred)],
+      .groups = "drop"
+    )
+  
+  return(seasonal_summary)
+}
+
+# -- Adjust NDVI for mean and max --
+adjust_ndvi <- function(data, model, seasonal_stats, adjust_max_only=FALSE) {
+  if (is.null(model) || is.null(seasonal_stats)) {
+    out <- data %>%
+      mutate(seasonal_component = NA_real_,
+             adj_ndvi_for_mean = NA_real_,
+             adj_ndvi_for_max = NA_real_)
+    if(adjust_max_only) out <- select(out, -adj_ndvi_for_mean)
+    return(out)
+  }
+  tryCatch({
+    seasonal_pred <- predict(model, newdata = data)
+    dim(seasonal_pred) <- NULL
+    
+    data_out <- data %>%
+      mutate(seasonal_component = seasonal_pred) %>%
+      left_join(seasonal_stats, by = "year")
+    
+    if (adjust_max_only) {
+      data_out <- data_out %>%
+        mutate(across(.cols = everything(), .fns = ~ .),  # force evaluation
+               !!sym(paste0("adjusted_ndvi_max")) := ndvi - (seasonal_component - max_seasonal)) 
+      
+      # We'll rename this column later when adding multiple k iterations
+      return(data_out)
+    } else {
+      data_out <- data_out %>%
+        mutate(
+          adj_ndvi_for_mean = ndvi - (seasonal_component - mean_seasonal),
+          adj_ndvi_for_max = ndvi - (seasonal_component - max_seasonal)
+        )
+      return(data_out)
+    }
+  }, error = function(e) {
+    data %>%
+      mutate(seasonal_component = NA_real_,
+             adj_ndvi_for_mean = NA_real_,
+             adj_ndvi_for_max = NA_real_)
+  })
+}
+
+
+# ---- (i) Iterating over k values 3:10 for doy, year on NH_PRE AZ only ----
+
+cat("Starting k-iteration on NH_PRE AZ data...\n", file=log_file, append=TRUE)
+
+nhpre_az_data <- analysis_data %>%
+  filter(site_id == "NH_PRE", zone == "AZ")
+
+k_values <- 3:10
+
+# For each combination of k, fit model and compute adjusted NDVI (max only)
+k_results_list <- list()
+
+for(k_doy in k_values) {
+  for(k_year in k_values) {
+    model_k <- fit_gam_with_k(nhpre_az_data, k_doy, k_year)
+    seasonal_stats_k <- generate_seasonal_stats(model_k, nhpre_az_data)  
+    adjusted_k <- adjust_ndvi(nhpre_az_data, model_k, seasonal_stats_k, adjust_max_only=TRUE)
+    
+    if(!is.null(model_k) && !is.null(seasonal_stats_k)) {
+      # Rename adjusted column to unique name for k combination (e.g. k53_adj_max)
+      col_rename <- paste0("k", k_doy, k_year, "_adj_max")
+      adjusted_k <- adjusted_k %>%
+        rename(!!col_rename := adjusted_ndvi_max) %>%
+        select(-seasonal_component, -mean_seasonal, -max_seasonal)
+    } else {
+      # If model fails, create NA column
+      col_rename <- paste0("k", k_doy, k_year, "_adj_max")
+      adjusted_k <- nhpre_az_data %>%
+        mutate(!!col_rename := NA_real_)
+    }
+    
+    # Keep only site_id, zone, year, doy, ndvi + new adjusted column
+    adjusted_k <- adjusted_k %>%
+      select(site_id, zone, year, doy, ndvi, all_of(col_rename))
+    
+    k_results_list[[paste0("k", k_doy, "_", k_year)]] <- adjusted_k
+  }
+}
+
+# Join all k adjustment columns into one wide dataframe by site_id, zone, year, doy, ndvi
+k_iteration_df <- reduce(k_results_list, full_join,
+                         by = c("site_id", "zone", "year", "doy", "ndvi"))
+
+# Save test output for iterative sensitivity test
+write_csv(k_iteration_df, file.path(output_dir, iteration_test_out))
+cat("Wrote NH_PRE AZ k-iteration max adjusted NDVI data\n", file=log_file, append=TRUE)
+
+
+# ---- (ii) Final GAM with k=(k_doy_final,k_year_final) for all sites and zones ----
+
+cat("Fitting final GAMs for all sites and zones with k=(",k_doy_final,",",k_year_final,") ...\n", file=log_file, append=TRUE)
+
+fit_phenological_gam_final <- function(data) {
+  fit_gam_with_k(data, k_doy_final, k_year_final)
+}
+
+phenological_models_final <- analysis_data %>%
+  group_by(site_id, zone) %>%
+  filter(n() >= 20) %>%
+  nest() %>%
+  mutate(
+    gam_model = map(data, fit_phenological_gam_final),
+    model_success = map_lgl(gam_model, ~ !is.null(.x))
+  )
+
+# Calculate seasonal stats (mean and max)
+phenological_models_final <- phenological_models_final %>%
+  filter(model_success) %>%
+  mutate(
+    seasonal_stats = map2(gam_model, data, generate_seasonal_stats)
+  )
+
+# Extract adjusted NDVI for mean and max
+phenological_results_final <- phenological_models_final %>%
+  mutate(
+    data_with_adjusted_ndvi = pmap(
+      list(gam_model, data, seasonal_stats),
+      function(model, data, seasonal_stats) {
+        adjust_ndvi(data = data, model = model, seasonal_stats = seasonal_stats, adjust_max_only = FALSE)
+      }
+    )
+  ) %>%
+  select(site_id, zone, data_with_adjusted_ndvi) %>%
+  unnest(data_with_adjusted_ndvi)
+
+# Filter valid data for mean adjustment
+deseasonalized_final <- phenological_results_final %>%
+  filter(!is.na(adj_ndvi_for_mean))
+
+# Save output with deseasonalized observations for all sites, zones, dates
+write_csv(deseasonalized_final, file.path(output_dir, deseasonalized_out))
+cat("Wrote deseasonalized data with mean and max adjustment for final model\n", file=log_file, append=TRUE)
+
+# Model summary
+model_summary_final <- phenological_models_final %>%
+  mutate(
+    n_observations = map_int(data, nrow),
+    r_squared = map_dbl(gam_model, ~ if (is.null(.x)) NA else summary(.x)$r.sq),
+    deviance_explained = map_dbl(gam_model, ~ if (is.null(.x)) NA else summary(.x)$dev.expl)
+  ) %>%
+  select(site_id, zone, n_observations, model_success, r_squared, deviance_explained)
+
+# Save output
+write_csv(model_summary_final, file.path(output_dir, phenological_summary_out))
+cat("Wrote phenological model summary for final model\n", file=log_file, append=TRUE)
+
+
+# ---- (iii) Leave-One-Year-Out Cross Validation (LOYO CV) on final model ----
+
+cat("Starting LOYO-CV on final model for all sites/zones...\n", file=log_file, append=TRUE)
+
+do_loyo_cv_final <- function(data) {
+  years <- unique(data$year)
+  map_dfr(years, function(test_year) {
+    train_data <- filter(data, year != test_year)
+    test_data <- filter(data, year == test_year)
+    
+    if(nrow(train_data) < 20 || nrow(test_data) == 0) {
+      return(tibble(
+        year = test_year,
+        n_train = nrow(train_data),
+        n_test = nrow(test_data),
+        rmse = NA_real_,
+        mae = NA_real_
+      ))
+    }
+    
+    model <- tryCatch({
+      gam(ndvi ~ te(doy, year, k=c(k_doy_final,k_year_final)), data=train_data, method="REML")
+    }, error=function(e) NULL)
+    
+    if(is.null(model)) {
+      return(tibble(
+        year = test_year,
+        n_train = nrow(train_data),
+        n_test = nrow(test_data),
+        rmse = NA_real_,
+        mae = NA_real_
+      ))
+    }
+    
+    pred <- tryCatch({
+      predict(model, newdata=test_data)
+    }, error=function(e) rep(NA_real_, nrow(test_data)))
+    
+    if(any(is.na(pred))) {
+      return(tibble(
+        year = test_year,
+        n_train = nrow(train_data),
+        n_test = nrow(test_data),
+        rmse = NA_real_,
+        mae = NA_real_
+      ))
+    }
+    
+    residuals <- test_data$ndvi - pred
+    rmse <- sqrt(mean(residuals^2, na.rm=TRUE))
+    mae <- mean(abs(residuals), na.rm=TRUE)
+    
+    tibble(
+      year = test_year,
+      n_train = nrow(train_data),
+      n_test = nrow(test_data),
+      rmse = rmse,
+      mae = mae
+    )
+  })
+}
+
+loyo_cv_results <- analysis_data %>%
+  group_by(site_id, zone) %>%
+  nest() %>%
+  mutate(cv_results = map(data, do_loyo_cv_final)) %>%
+  select(site_id, zone, cv_results) %>%
+  unnest(cv_results)
+
+# Saving output from cross-validation
+write_csv(loyo_cv_results, file.path(output_dir, loyo_results_out))
+cat("Wrote LOYO CV results for final model\n", file=log_file, append=TRUE)
+
+# Update processing log
+cat("LOYO-CV results available for", nrow(loyo_cv_results), "year-site-zone combinations\n", file = log_file, append = TRUE)
+cat(step_str, "analysis finished:", format(Sys.time()), "\n\n", file = log_file, append = TRUE)
+cat("Phenological modeling with adjustments completed\n")

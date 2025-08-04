@@ -1,0 +1,111 @@
+# Alpine zone project - data processing script
+#   Workflow for ecological communities
+# Step 09: Multi-Zone Comparisons
+#
+# Jonathan W. Chipman, Dartmouth College
+# Written with the assistance of Claude 4 Sonnet AI and GPT 4.1
+# Updated 2025-06-27 (modified to exclude az_size_class, sub-region, elevation)
+
+# Reads output/eco05_annual_for_trends.csv
+# Reads output/eco06_trend_analysis_results_mean.csv
+# Reads output/eco06_trend_analysis_results_max.csv
+# Writes output/eco09_multi_zone_annual_mean.csv
+# Writes output/eco09_multi_zone_annual_max.csv
+# Writes output/eco09_zone_mixed_model_results_mean.csv
+# Writes output/eco09_zone_mixed_model_results_max.csv
+
+# Set current step number
+step_str <- "Step 09"
+step_txt <- "Multi-Zone Comparisons (7 zones)"
+
+# Required libraries
+library(tidyverse)
+library(nlme)  # for lme()
+library(broom) # for tidy()
+
+# Set working directory and input
+setwd("D:/alpine_zone")
+analysis_data_in <- "eco05_annual_for_trends.csv"
+trend_results_mean_in <- "eco06_trend_analysis_results_mean.csv"
+trend_results_max_in <- "eco06_trend_analysis_results_max.csv"
+
+# Set output file info
+log_file <- "eco_processing_log.txt"
+output_dir <- "eco_output"
+annual_basename <- "eco09_multi_zone_annual_"
+zone_mixed_model_basename <- "eco09_zone_mixed_model_results_"
+
+# Initialize log file
+cat(step_str, step_txt, "\n", file = log_file, append = TRUE)
+cat("Analysis started:", format(Sys.time()), "\n", file = log_file, append = TRUE)
+
+# Read input data
+annual_for_trends <- read_csv(file.path(output_dir, analysis_data_in))
+trend_analysis_mean <- read_csv(file.path(output_dir, trend_results_mean_in))
+trend_analysis_max <- read_csv(file.path(output_dir, trend_results_max_in))
+
+# Function to process multi-zone comparisons for a given NDVI suffix ("mean" or "max")
+process_multi_zone_comparisons <- function(ndvi_suffix) {
+  ndvi_field <- paste0("ndvi_annual_deseason_", ndvi_suffix)
+
+  # Define the seven zones of interest
+  zones_of_interest <- c("birch", "cliff", "cushion", "fellfield", "heath", "sedge", "krummholz")
+
+  # Filter data to include only these zones and relevant columns; exclude az_size_class, SubRegion, elevation
+  multi_zone_data <- annual_for_trends %>%
+    filter(zone %in% zones_of_interest) %>%
+    select(site_id, year, zone, !!sym(ndvi_field), n_obs) %>%
+    mutate(zone = factor(zone, levels = zones_of_interest)) %>%
+    filter(!is.na(!!sym(ndvi_field)))
+
+  cat(paste0("Observations for 7 zones (", ndvi_suffix, "): "), nrow(multi_zone_data), "\n")
+  cat(paste0("Unique sites with zones (", ndvi_suffix, "): "), length(unique(multi_zone_data$site_id)), "\n")
+
+  # Summarize mean NDVI per zone for information
+  zone_summary <- multi_zone_data %>%
+    group_by(zone) %>%
+    summarise(
+      n_obs = n(),
+      mean_ndvi = mean(!!sym(ndvi_field), na.rm = TRUE),
+      sd_ndvi = sd(!!sym(ndvi_field), na.rm = TRUE),
+      .groups = "drop"
+    )
+  print(zone_summary)
+
+  # Fit mixed-effects model with zone and year as fixed effects, site_id as random intercept
+  zone_mixed_model <- nlme::lme(
+    fixed = as.formula(paste(ndvi_field, "~ zone + year")),
+    random = ~1 | site_id,
+    data = multi_zone_data,
+    method = "REML"
+  )
+
+  zone_model_summary <- summary(zone_mixed_model)
+
+  # Extract fixed effects results and write output
+  zone_model_summary <- summary(zone_mixed_model)
+
+  zone_model_results <- as.data.frame(zone_model_summary$tTable) %>%
+    rownames_to_column(var = "term") %>%
+    rename(
+      estimate = Value,
+      se = `Std.Error`,
+      t_value = `t-value`,
+      p_value = `p-value`
+    )
+
+  write_csv(multi_zone_data, paste0(output_dir, "/", annual_basename, ndvi_suffix, ".csv"))
+  write_csv(zone_model_results, paste0(output_dir, "/", zone_mixed_model_basename, ndvi_suffix, ".csv"))
+
+  cat("=== MULTI-ZONE MIXED MODEL RESULTS for NDVI ", ndvi_suffix, " ===\n", sep = "")
+  print(zone_model_results)
+
+  invisible(NULL)
+}
+
+# Run analyses for both NDVI mean and max products
+process_multi_zone_comparisons("mean")
+process_multi_zone_comparisons("max")
+
+# Update processing log
+cat(step_str, "analysis finished:", format(Sys.time()), "\n\n", file = log_file, append = TRUE)

@@ -1,0 +1,7 @@
+analysis,ndvi_metric,zone,n_sites,max_distance_km,n_neighbors_total,moran_i,expected_i,p_value,significant,interpretation
+Phenological peak_doy_change changes AZ,phenology,AZ,35,500,650,-0.058,-0.029,0.782,FALSE,No significant spatial autocorrelation
+Phenological peak_doy_change changes USAZ,phenology,USAZ,35,500,650,0.066,-0.029,0.005,TRUE,Weak positive spatial autocorrelation
+Phenological peak_ndvi_change changes AZ,phenology,AZ,35,500,650,0.243,-0.029,0,TRUE,Moderate positive spatial autocorrelation
+Phenological peak_ndvi_change changes USAZ,phenology,USAZ,35,500,650,0.194,-0.029,0,TRUE,Moderate positive spatial autocorrelation
+Phenological seasonal_mean_ndvi_change changes AZ,phenology,AZ,35,500,650,0.124,-0.029,0,TRUE,Moderate positive spatial autocorrelation
+Phenological seasonal_mean_ndvi_change changes USAZ,phenology,USAZ,35,500,650,0.182,-0.029,0,TRUE,Moderate positive spatial autocorrelation

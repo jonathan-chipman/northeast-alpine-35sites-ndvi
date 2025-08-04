@@ -1,0 +1,190 @@
+# Alpine zone project - data processing script
+#   Workflow for ecological communities
+# Step 06: Long-Term Trend Analysis
+#
+# Jonathan W. Chipman, Dartmouth College
+# Written with the assistance of Claude 4 Sonnet AI and GPT 4.1
+# Updated 2025-06-25
+
+# Reads output/step05_annual_for_trends.csv (from Step 05)
+
+# Writes output/eco06_trend_analysis_results_[mean|max] - LOESS results, for mean and max
+# Writes output/eco06_mk_test_results_[mean|max] - LOESS summary, for mean and max
+
+# Set current step number
+step_str <- "Step 06"
+step_txt <- "Long-Term Trend Analysis"
+
+# Define consistent start and end points for LOESS models at all sites:
+start_year <- 1984
+end_year <- 2024
+
+# Define span for LOESS model
+span_val <- 0.75
+
+# Required libraries
+library(tidyverse)
+library(Kendall)  # for Mann-Kendall test
+
+# Set working directory and input
+setwd("D:/alpine_zone")
+annual_for_trends_in <- "eco05_annual_for_trends.csv"
+
+# Set output file info
+log_file <- "eco_processing_log.txt"
+output_dir <- "eco_output"
+trend_analysis_basename <- "eco06_trend_analysis_results_" # Will have suffixes appended for mean/max
+mk_basename <- "eco06_mk_test_results_" # Will have suffixes appended for mean/max
+
+# Initialize log file
+cat(step_str, step_txt, "\n", file = log_file, append = TRUE)
+cat("Analysis started:", format(Sys.time()), "\n", file = log_file, append = TRUE)
+
+# Read input data
+annual_for_trends <- read_csv(file.path(output_dir, annual_for_trends_in))
+
+
+# Function to fit LOESS and extract trend magnitude (existing)
+fit_loess_trend <- function(data, span = span_val, ndvi_col) {
+  if (nrow(data) < 8) {
+    return(tibble(
+      start_year = NA_integer_, end_year = NA_integer_,
+      start_ndvi = NA_real_, end_ndvi = NA_real_,
+      start_se = NA_real_, end_se = NA_real_,
+      total_change = NA_real_, change_se = NA_real_,
+      change_per_decade = NA_real_, change_t_stat = NA_real_,
+      change_p_value = NA_real_, significant_change = FALSE,
+      model_success = FALSE
+    ))
+  }
+  
+  tryCatch({
+    loess_model <- loess(
+      formula = as.formula(paste(ndvi_col, "~ year")),
+      data = data,
+      span = span,
+      weights = data$weight_factor,
+      control = loess.control(surface = "direct")  # Enable limited extrapolation for missing start year
+    )
+
+    pred_data <- tibble(year = c(start_year, end_year))
+    predictions <- predict(loess_model, pred_data, se=TRUE)
+    
+    total_change <- predictions$fit[2] - predictions$fit[1]
+    change_se <- sqrt(predictions$se.fit[1]^2 + predictions$se.fit[2]^2)
+    change_per_decade <- total_change / (end_year - start_year) * 10
+    change_t_stat <- total_change / change_se
+    df_approx <- nrow(data) - 4
+    change_p_value <- 2 * pt(abs(change_t_stat), df=df_approx, lower.tail=FALSE)
+    
+    tibble(
+      start_year = start_year,
+      end_year = end_year,
+      start_ndvi = predictions$fit[1],
+      end_ndvi = predictions$fit[2],
+      start_se = predictions$se.fit[1],
+      end_se = predictions$se.fit[2],
+      total_change = total_change,
+      change_se = change_se,
+      change_per_decade = change_per_decade,
+      change_t_stat = change_t_stat,
+      change_p_value = change_p_value,
+      significant_change = change_p_value < 0.05,
+      model_success = TRUE
+    )
+  }, error = function(e) {
+    tibble(
+      start_year = min(data$year, na.rm = TRUE),
+      end_year = max(data$year, na.rm = TRUE),
+      start_ndvi = NA_real_, end_ndvi = NA_real_,
+      start_se = NA_real_, end_se = NA_real_,
+      total_change = NA_real_, change_se = NA_real_,
+      change_per_decade = NA_real_, change_t_stat = NA_real_,
+      change_p_value = NA_real_, significant_change = FALSE,
+      model_success = FALSE
+    )
+  })
+}
+
+# Function to perform Mann-Kendall test on NDVI time series
+perform_mk_test <- function(data, ndvi_col) {
+  # Require at least 8 years for trend analysis
+  if (nrow(data) < 8) {
+    return(tibble(
+      mk_tau = NA_real_,
+      mk_p_value = NA_real_,
+      mk_significant = FALSE
+    ))
+  }
+  
+  series <- data[[ndvi_col]]
+  
+  # Check for sufficient non-NA observations
+  if (sum(!is.na(series)) < 8) {
+    return(tibble(
+      mk_tau = NA_real_,
+      mk_p_value = NA_real_,
+      mk_significant = FALSE
+    ))
+  }
+  
+  mk_result <- Kendall::MannKendall(series)
+  
+  tibble(
+    mk_tau = mk_result$tau,
+    mk_p_value = mk_result$sl,
+    mk_significant = mk_result$sl < 0.05
+  )
+}
+
+# List of NDVI columns to analyze
+ndvi_columns <- c("ndvi_annual_deseason_mean", "ndvi_annual_deseason_max")
+suffixes <- c("mean", "max")
+
+for (i in seq_along(ndvi_columns)) {
+  ndvi_col <- ndvi_columns[i]
+  suffix <- suffixes[i]
+  
+  # LOESS trend analysis
+  trend_analysis <- annual_for_trends %>%
+    group_by(site_id, zone, SP, SubRegion, Elevation_m, elevation_relative, az_size_class) %>%
+    nest() %>%
+    mutate(trend_results = map(data, fit_loess_trend, ndvi_col=ndvi_col)) %>%
+    unnest(trend_results) %>%
+    select(-data)
+  
+  # Add trend direction and magnitude classes as before
+  trend_analysis <- trend_analysis %>%
+    mutate(
+      trend_direction = case_when(
+        !model_success ~ "Model failed",
+        !significant_change ~ "No significant trend",
+        change_per_decade > 0 ~ "Increasing",
+        change_per_decade < 0 ~ "Decreasing",
+        TRUE ~ "No significant trend"
+      ),
+      change_magnitude = case_when(
+        !significant_change ~ "Not significant",
+        abs(change_per_decade) < 0.01 ~ "Small",
+        abs(change_per_decade) < 0.02 ~ "Moderate",
+        TRUE ~ "Large"
+      )
+    )
+  
+  # Mann-Kendall test analysis
+  mk_analysis <- annual_for_trends %>%
+    group_by(site_id, zone, SP, SubRegion, Elevation_m, elevation_relative, az_size_class) %>%
+    nest() %>%
+    mutate(mk_results = map(data, perform_mk_test, ndvi_col=ndvi_col)) %>%
+    unnest(mk_results) %>%
+    select(-data)
+  
+  # Write LOESS trend analysis results
+  write_csv(trend_analysis, paste0(output_dir,"/", trend_analysis_basename, suffix, ".csv"))
+  
+  # Write Mann-Kendall test results
+  write_csv(mk_analysis, paste0(output_dir,"/",mk_basename, suffix, ".csv"))
+}
+
+# Update processing log
+cat(step_str,"analysis finished:", format(Sys.time()), "\n\n", file = log_file, append = TRUE)

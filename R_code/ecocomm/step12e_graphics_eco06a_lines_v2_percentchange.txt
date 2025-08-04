@@ -1,0 +1,140 @@
+library(tidyverse)
+library(scales)
+library(dplyr)
+
+# Choose NDVI metric to plot: "mean" or "max"
+ndvi_metric <- "max"
+
+# Parameters
+span_val <- 0.75
+start_year <- 1984
+end_year <- 2024
+prediction_years <- tibble(year = start_year:end_year)
+sites_of_interest <- c("NH_PRE", "ME_KAT")
+
+# Set ndvi column name based on metric
+ndvi_col <- ifelse(ndvi_metric == "mean", "ndvi_annual_deseason_mean", "ndvi_annual_deseason_max")
+
+# Read eco05 data (7 zones except USAZ)
+eco05_data <- read_csv("eco_output/eco05_annual_for_trends.csv") %>%
+  filter(site_id %in% sites_of_interest) %>%
+  filter(zone != "USAZ")
+
+# Read USAZ data (only for those sites)
+usaz_data <- read_csv("output/step05_annual_for_trends.csv") %>%
+  filter(site_id %in% sites_of_interest, zone == "USAZ")
+
+# Combine data
+combined_data <- bind_rows(eco05_data, usaz_data)
+
+# LOESS fit function, same as eco06
+fit_loess_predict <- function(df, ndvi_col = paste('\"',ndvi_col,'\"',sep=""), span = span_val) {
+  if (nrow(df) < 8) return(tibble(year = integer(), fit = double()))
+  
+  loess_mod <- loess(as.formula(paste(ndvi_col, "~ year")),
+                     data = df, span = span,
+                     control = loess.control(surface = "direct"),
+                     weights = df$weight_factor)
+  
+  preds <- predict(loess_mod, newdata = prediction_years, se = FALSE)
+  tibble(year = prediction_years$year, fit = preds)
+}
+
+# Apply LOESS fits grouped by site and zone
+fits <- combined_data %>%
+  group_by(site_id, zone) %>%
+  nest() %>%
+  mutate(fit_data = map(data, ~ fit_loess_predict(.x, ndvi_col = ndvi_col))) %>%
+  select(-data) %>%
+  unnest(fit_data)
+
+# Set factor levels for consistent zone order (adjust as needed)
+zone_levels <- c("birch", "cliff", "cushion", "fellfield", "heath", "sedge", "krummholz", "USAZ")
+fits$zone <- factor(fits$zone, levels = zone_levels)
+fits$site_id <- factor(fits$site_id, levels = sites_of_interest)
+
+# Define colors and linetypes for all zones
+zone_colors <- c(
+  "birch" = "#AEC6CF",
+  "cliff" = "#FFB347",
+  "cushion" = "#77DD77",
+  "fellfield" = "#CBAACB",
+  "heath" = "#FFD1DC",
+  "sedge" = "#B0E0E6",
+  "krummholz" = "#448833",
+  "USAZ" = "#666666"
+)
+zone_linetypes <- c(
+  "birch" = "solid",
+  "cliff" = "solid",
+  "cushion" = "solid",
+  "fellfield" = "solid",
+  "heath" = "solid",
+  "sedge" = "solid",
+  "krummholz" = "solid",
+  "USAZ" = "dotted"
+)
+
+# Calculate baseline 1984 fit per site and zone
+baseline_1984 <- fits %>%
+  filter(year == 1984) %>%
+  select(site_id, zone, baseline_fit = fit)
+
+# Join baseline to all fits and calculate percent change from 1984
+fits_pct_change <- fits %>%
+  left_join(baseline_1984, by = c("site_id", "zone")) %>%
+  mutate(pct_change = 100 * (fit - baseline_fit) / baseline_fit)
+
+# Set y axis range
+y_min <- min(fits_pct_change$pct_change, na.rm = TRUE)
+y_max <- max(fits_pct_change$pct_change, na.rm = TRUE)
+
+
+# Now plot using pct_change on y axis
+p <- ggplot(fits_pct_change, aes(x = year, y = pct_change, color = zone, linetype = zone)) +
+  geom_line(size = 1.2) +
+  facet_wrap(~ site_id, nrow = 1, scales = "fixed") +
+  scale_color_manual(values = zone_colors) +
+  scale_linetype_manual(values = zone_linetypes) +
+  scale_x_continuous(
+    breaks = seq(start_year, end_year, 10),
+    limits = c(start_year, end_year)
+  ) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +  # format y axis as percentages
+  labs(
+    x = "Year",
+    y = paste("Percent change in NDVI", ndvi_metric, "from 1984"),
+    color = "Zone",
+    linetype = "Zone"
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    legend.title = element_text(margin = margin(r = 10)),
+    legend.key.width = unit(1.5, "lines"),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    strip.background = element_rect(fill = "gray90"),
+    strip.text = element_text(face = "bold")
+  )
+
+p <- p + theme(
+  legend.position = "bottom",
+  legend.direction = "horizontal",
+  legend.box = "horizontal",
+  legend.title = element_text(margin = margin(r = 10)),
+  legend.key.width = unit(1.5, "lines")
+)
+
+print(p)
+
+# Save plot
+ggsave(filename = paste0("output/figures/ndvi_", ndvi_metric, "_loess_change_by_zone_site.png"),
+       plot = p, width = 12, height = 8, dpi = 500)
+
+print(p)

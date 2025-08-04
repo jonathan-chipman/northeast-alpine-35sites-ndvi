@@ -1,0 +1,282 @@
+# Alpine zone project - data processing script
+# Step 10: Regional and Multi-factor Analysis
+#
+# Jonathan W. Chipman, Dartmouth College
+# Written with the assistance of Claude 4 Sonnet AI and GPT 4.1
+# Updated 2025-06-27
+#
+# Reads:
+#   step06_trend_analysis_results_mean.csv (from Step 06)
+#   step06_trend_analysis_results_max.csv  (from Step 06)
+#   step07_phenological_changes_start_end.csv (from Step 07)
+#
+# Writes:
+#   step10_regional_multifactor_trends_mean.csv
+#   step10_regional_multifactor_trends_max.csv
+#   step10_elevation_effects_within_subregions_mean.csv
+#   step10_elevation_effects_within_subregions_max.csv
+#   step10_az_size_effects_mean.csv
+#   step10_az_size_effects_max.csv
+#   step10_geographic_gradient_analysis_mean.csv
+#   step10_geographic_gradient_analysis_max.csv
+#   step10_phenological_multifactor.csv
+#   step10_strongest_most_consistent_trends_mean.csv
+#   step10_strongest_most_consistent_trends_max.csv
+#   step10_elevation_size_interaction_mean.csv
+#   step10_elevation_size_interaction_max.csv
+
+# Set current step number
+step_str <- "Step 10"
+step_txt <- "Regional and Multi-factor Analysis"
+
+# Required libraries
+library(tidyverse)
+
+# Set working directory and input
+setwd("D:/alpine_zone")
+trend_results_mean_in <- "step06_trend_analysis_results_mean.csv"
+trend_results_max_in <- "step06_trend_analysis_results_max.csv"
+phenological_changes_in <- "step07_phenological_changes_start_end.csv"
+
+# Set output file info
+log_file <- "processing_log.txt"
+output_dir <- "output"
+# Individual output file names listed below, when writing...
+
+# Initialize log file
+cat(step_str, step_txt, "\n", file = log_file, append = TRUE)
+cat("Analysis started:", format(Sys.time()), "\n", file = log_file, append = TRUE)
+
+# Read input data
+trend_mean <- read_csv(file.path(output_dir, trend_results_mean_in)) %>% 
+  mutate(ndvi_metric = "mean")
+trend_max <- read_csv(file.path(output_dir, trend_results_max_in)) %>%
+  mutate(ndvi_metric = "max")
+phenology_changes <- read_csv(file.path(output_dir, phenological_changes_in))
+
+# Combine trend data for unified analysis
+trend_all <- bind_rows(trend_mean, trend_max)
+
+# Regional multifactor trends summary (per NDVI metric)
+regional_multifactor_trends <- trend_all %>%
+  filter(model_success) %>%
+  group_by(SubRegion, zone, az_size_class, ndvi_metric) %>%
+  summarise(
+    n_sites = n(),
+    pct_increasing = round(mean(trend_direction == "Increasing") * 100, 1),
+    pct_decreasing = round(mean(trend_direction == "Decreasing") * 100, 1),
+    pct_no_trend = round(mean(trend_direction == "No significant trend") * 100, 1),
+    median_change_per_decade = round(median(change_per_decade, na.rm = TRUE), 4),
+    mean_change_per_decade = round(mean(change_per_decade, na.rm = TRUE), 4),
+    sd_change_per_decade = round(sd(change_per_decade, na.rm = TRUE), 4),
+    .groups = "drop"
+  ) %>%
+  arrange(ndvi_metric, SubRegion, zone, az_size_class)
+
+# Elevation effects within subregions (per NDVI metric)
+elevation_effects <- trend_all %>%
+  filter(model_success, !is.na(elevation_relative)) %>%
+  group_by(SubRegion, zone, ndvi_metric) %>%
+  filter(n() >= 3) %>%  # At least 3 sites per subregion
+  summarise(
+    n_sites = n(),
+    elevation_trend_correlation = cor(elevation_relative, change_per_decade, use = "complete.obs"),
+    elevation_trend_p = if(n() >= 4) cor.test(elevation_relative, change_per_decade)$p.value else NA_real_,
+    elevation_effect_significant = !is.na(elevation_trend_p) & elevation_trend_p < 0.05,
+    mean_elevation_relative = round(mean(elevation_relative), 0),
+    range_elevation_relative = max(elevation_relative) - min(elevation_relative),
+    .groups = "drop"
+  ) %>%
+  arrange(ndvi_metric, SubRegion, zone)
+
+# AZ size effects per NDVI metric
+az_size_effects <- trend_all %>%
+  filter(model_success, !is.na(az_size_class)) %>%
+  group_by(zone, az_size_class, ndvi_metric) %>%
+  summarise(
+    n_sites = n(),
+    mean_change_per_decade = round(mean(change_per_decade, na.rm = TRUE), 4),
+    median_change_per_decade = round(median(change_per_decade, na.rm = TRUE), 4),
+    pct_significant_trends = round(mean(significant_change) * 100, 1),
+    .groups = "drop"
+  ) %>%
+  arrange(ndvi_metric, zone, az_size_class)
+
+# Geographic gradient analysis (subregions arranged along latitude proxy)
+subregion_order <- trend_all %>%
+  filter(model_success) %>%
+  group_by(SubRegion, ndvi_metric) %>%
+  summarise(
+    mean_latitude = mean(Elevation_m, na.rm = TRUE),  # Proxy for position along geographic gradient
+    .groups = "drop"
+  ) %>%
+  arrange(ndvi_metric, mean_latitude) %>%
+  group_by(ndvi_metric) %>%
+  mutate(subregion_order = row_number())
+
+geographic_gradient <- trend_all %>%
+  filter(model_success) %>%
+  left_join(subregion_order, by = c("SubRegion", "ndvi_metric")) %>%
+  group_by(SubRegion, subregion_order, zone, ndvi_metric) %>%
+  summarise(
+    n_sites = n(),
+    mean_change_per_decade = round(mean(change_per_decade, na.rm = TRUE), 4),
+    pct_increasing = round(mean(trend_direction == "Increasing") * 100, 1),
+    .groups = "drop"
+  ) %>%
+  arrange(ndvi_metric, subregion_order, zone)
+
+# Phenological multifactor analysis using updated Step 7 output
+# --------------------------------
+# Phenological multifactor analysis using combined phenology metrics (single input file)
+phenology_changes <- phenology_changes %>%
+  mutate(
+    peak_timing_trend = case_when(
+      peak_doy_significant & peak_doy_change < 0 ~ "Earlier",
+      peak_doy_significant & peak_doy_change > 0 ~ "Later",
+      TRUE ~ "No significant change"
+    ),
+    amplitude_trend = case_when(
+      peak_ndvi_significant & peak_ndvi_change > 0 ~ "Increasing",
+      peak_ndvi_significant & peak_ndvi_change < 0 ~ "Decreasing",
+      TRUE ~ "No significant change"
+    ),
+    seasonal_mean_trend = case_when(
+      seasonal_mean_ndvi_significant & seasonal_mean_ndvi_change > 0 ~ "Increasing",
+      seasonal_mean_ndvi_significant & seasonal_mean_ndvi_change < 0 ~ "Decreasing",
+      TRUE ~ "No significant change"
+    )
+  )
+
+phenological_multifactor <- phenology_changes %>%
+  group_by(SubRegion, zone, az_size_class) %>%
+  summarise(
+    n_sites = n(),
+    # Peak timing
+    pct_earlier = round(mean(peak_timing_trend == "Earlier") * 100, 1),
+    pct_later = round(mean(peak_timing_trend == "Later") * 100, 1),
+    pct_no_timing_change = round(mean(peak_timing_trend == "No significant change") * 100, 1),
+    median_timing_change_days_per_decade = round(median(peak_doy_change / 4, na.rm = TRUE), 2),
+    
+    # Amplitude (peak NDVI)
+    pct_amp_increasing = round(mean(amplitude_trend == "Increasing") * 100, 1),
+    pct_amp_decreasing = round(mean(amplitude_trend == "Decreasing") * 100, 1),
+    pct_amp_no_change = round(mean(amplitude_trend == "No significant change") * 100, 1),
+    median_amp_change_per_decade = round(median(peak_ndvi_change / 4, na.rm = TRUE), 4),
+    
+    # Seasonal mean NDVI
+    pct_seasonal_mean_increasing = round(mean(seasonal_mean_trend == "Increasing") * 100, 1),
+    pct_seasonal_mean_decreasing = round(mean(seasonal_mean_trend == "Decreasing") * 100, 1),
+    pct_seasonal_mean_no_change = round(mean(seasonal_mean_trend == "No significant change") * 100, 1),
+    median_seasonal_mean_change_per_decade = round(median(seasonal_mean_ndvi_change / 4, na.rm = TRUE), 4),
+    
+    .groups = "drop"
+  ) %>%
+  arrange(SubRegion, zone, az_size_class)
+
+# Print phenological summary
+cat("\nPhenological multifactor analysis summary:\n")
+print(phenological_multifactor)
+
+# Strongest and most consistent patterns for each NDVI product
+strongest_trends <- trend_all %>%
+  filter(model_success, significant_change) %>%
+  mutate(
+    abs_change = abs(change_per_decade),
+    trend_strength = case_when(
+      abs_change >= 0.02 ~ "Strong",
+      abs_change >= 0.01 ~ "Moderate",
+      TRUE ~ "Weak"
+    )
+  ) %>%
+  group_by(SubRegion, zone, ndvi_metric) %>%
+  summarise(
+    n_sites = n(),
+    n_significant = sum(significant_change),
+    pct_significant = round(mean(significant_change) * 100, 1),
+    pct_strong_trends = round(mean(trend_strength == "Strong") * 100, 1),
+    most_common_direction = names(sort(table(trend_direction), decreasing = TRUE))[1],
+    consistency_score = max(table(trend_direction)) / n(),
+    .groups = "drop"
+  ) %>%
+  arrange(ndvi_metric, desc(consistency_score))
+
+# Cross-factor analysis of elevation vs AZ size per NDVI metric
+elevation_size_interaction <- trend_all %>%
+  filter(model_success, !is.na(elevation_relative), !is.na(az_size_class)) %>%
+  mutate(
+    elevation_size_group = paste0(
+      ifelse(elevation_relative > 0, "High_elev", "Low_elev"), "_",
+      az_size_class
+    )
+  ) %>%
+  group_by(zone, elevation_size_group, ndvi_metric) %>%
+  summarise(
+    n_sites = n(),
+    mean_change_per_decade = round(mean(change_per_decade, na.rm = TRUE), 4),
+    pct_significant = round(mean(significant_change) * 100, 1),
+    .groups = "drop"
+  ) %>%
+  filter(n_sites >= 2) %>%
+  arrange(ndvi_metric, zone, elevation_size_group)
+
+# Write output files
+write_csv(regional_multifactor_trends %>% filter(ndvi_metric == "mean"), file.path(output_dir, "step10_regional_multifactor_trends_mean.csv"))
+write_csv(regional_multifactor_trends %>% filter(ndvi_metric == "max"), file.path(output_dir, "step10_regional_multifactor_trends_max.csv"))
+
+write_csv(elevation_effects %>% filter(ndvi_metric == "mean"), file.path(output_dir, "step10_elevation_effects_within_subregions_mean.csv"))
+write_csv(elevation_effects %>% filter(ndvi_metric == "max"), file.path(output_dir, "step10_elevation_effects_within_subregions_max.csv"))
+
+write_csv(az_size_effects %>% filter(ndvi_metric == "mean"), file.path(output_dir, "step10_az_size_effects_mean.csv"))
+write_csv(az_size_effects %>% filter(ndvi_metric == "max"), file.path(output_dir, "step10_az_size_effects_max.csv"))
+
+write_csv(geographic_gradient %>% filter(ndvi_metric == "mean"), file.path(output_dir, "step10_geographic_gradient_analysis_mean.csv"))
+write_csv(geographic_gradient %>% filter(ndvi_metric == "max"), file.path(output_dir, "step10_geographic_gradient_analysis_max.csv"))
+
+write_csv(phenological_multifactor, file.path(output_dir, "step10_phenological_multifactor_summary.csv"))
+
+write_csv(strongest_trends %>% filter(ndvi_metric == "mean"), file.path(output_dir, "step10_strongest_most_consistent_trends_mean.csv"))
+write_csv(strongest_trends %>% filter(ndvi_metric == "max"), file.path(output_dir, "step10_strongest_most_consistent_trends_max.csv"))
+
+write_csv(elevation_size_interaction %>% filter(ndvi_metric == "mean"), file.path(output_dir, "step10_elevation_size_interaction_mean.csv"))
+write_csv(elevation_size_interaction %>% filter(ndvi_metric == "max"), file.path(output_dir, "step10_elevation_size_interaction_max.csv"))
+
+# Print some key output summaries
+cat("=== REGIONAL AND MULTI-FACTOR ANALYSIS Summary ===\n")
+
+cat("\nStrongest and most consistent regional patterns (mean NDVI):\n")
+print(head(strongest_trends %>% filter(ndvi_metric == "mean"), 10))
+
+cat("\nStrongest and most consistent regional patterns (max NDVI):\n")
+print(head(strongest_trends %>% filter(ndvi_metric == "max"), 10))
+
+cat("\nElevation effects within subregions (mean NDVI):\n")
+elevation_significant_mean <- filter(elevation_effects, elevation_effect_significant & ndvi_metric == "mean")
+if (nrow(elevation_significant_mean) > 0) {
+  print(elevation_significant_mean)
+} else {
+  cat("No significant elevation effects detected within subregions (mean NDVI)\n")
+}
+
+cat("\nElevation effects within subregions (max NDVI):\n")
+elevation_significant_max <- filter(elevation_effects, elevation_effect_significant & ndvi_metric == "max")
+if (nrow(elevation_significant_max) > 0) {
+  print(elevation_significant_max)
+} else {
+  cat("No significant elevation effects detected within subregions (max NDVI)\n")
+}
+
+cat("\nAZ size effects summary (mean NDVI):\n")
+print(az_size_effects %>% filter(ndvi_metric == "mean"))
+
+cat("\nAZ size effects summary (max NDVI):\n")
+print(az_size_effects %>% filter(ndvi_metric == "max"))
+
+cat("\nGeographic gradient analysis (SW to NE) for mean NDVI:\n")
+print(geographic_gradient %>% filter(ndvi_metric == "mean"))
+
+cat("\nGeographic gradient analysis (SW to NE) for max NDVI:\n")
+print(geographic_gradient %>% filter(ndvi_metric == "max"))
+
+# Update processing log
+cat(step_str, "analysis finished:", format(Sys.time()), "\n\n", file = log_file, append = TRUE)

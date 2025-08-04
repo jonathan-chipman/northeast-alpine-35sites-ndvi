@@ -1,0 +1,226 @@
+# Alpine zone project - data processing script
+# Step 09: Zone Comparisons (Alpine vs. Upper Subalpine)
+#
+# Jonathan W. Chipman, Dartmouth College
+# Written with the assistance of Claude 4 Sonnet AI and GPT 4.1
+# Updated 2025-06-27
+
+# Reads output/step05_annual_for_trends.csv
+# Reads output/step06_trend_analysis_results_mean.csv
+# Reads output/step06_trend_analysis_results_max.csv
+# Writes output/step09_paired_sites_annual_mean.csv 
+# Writes output/step09_paired_sites_annual_max.csv 
+# Writes output/step09_site_specific_comparisons_mean.csv 
+# Writes output/step09_site_specific_comparisons_max.csv 
+# Writes output/step09_trend_analysis_subset_mean.csv 
+# Writes output/step09_trend_analysis_subset_max.csv 
+# Writes output/step09_regional_zone_summary_mean.csv 
+# Writes output/step09_regional_zone_summary_max.csv 
+# Writes output/step09_elevation_zone_effects_mean.csv 
+# Writes output/step09_elevation_zone_effects_max.csv 
+# Writes output/step09_zone_mixed_model_results_mean.csv 
+# Writes output/step09_zone_mixed_model_results_max.csv 
+
+# Set current step number
+step_str <- "Step 09"
+step_txt <- "Zone Comparisons (Alpine vs. Upper Subalpine)"
+
+# Required libraries
+library(tidyverse)
+library(nlme)  # for lme()
+
+# Set working directory and input
+setwd("D:/alpine_zone")
+analysis_data_in <- "step05_annual_for_trends.csv"
+trend_results_mean_in <- "step06_trend_analysis_results_mean.csv"
+trend_results_max_in <- "step06_trend_analysis_results_max.csv"
+
+# Set output file info
+log_file <- "processing_log.txt"
+output_dir <- "output"
+paired_sites_basename <- "step09_paired_sites_annual_"
+site_comparisons_basename <- "step09_site_specific_comparisons_"
+trend_analysis_basename <- "step09_trend_analysis_"
+regional_summary_basename <- "step09_regional_zone_summary_"
+elevation_effects_basename <- "step09_elevation_zone_effects_"
+zone_mixed_model_basename <- "step09_zone_mixed_model_results_"
+
+# Initialize log file
+cat(step_str, step_txt, "\n", file = log_file, append = TRUE)
+cat("Analysis started:", format(Sys.time()), "\n", file = log_file, append = TRUE)
+
+# Read input data
+annual_for_trends <- read_csv(file.path(output_dir, analysis_data_in))
+trend_analysis_mean <- read_csv(file.path(output_dir, trend_results_mean_in))
+trend_analysis_max <- read_csv(file.path(output_dir, trend_results_max_in))
+
+# Function to process paired sites and comparisons for a given NDVI suffix ("mean" or "max")
+process_zone_comparisons <- function(ndvi_suffix) {
+  ndvi_field <- paste0("ndvi_annual_deseason_", ndvi_suffix)
+  
+  # Create paired datasets for sites with both AZ and USAZ data
+  paired_sites_annual <- annual_for_trends %>%
+  # Find site-year groups with both AZ and USAZ zones present
+  group_by(site_id, year) %>%
+  filter(n_distinct(zone) >= 2 && all(c("AZ", "USAZ") %in% zone)) %>%
+  ungroup() %>%
+  select(site_id, year, zone, !!sym(ndvi_field), n_obs, SubRegion, elevation_relative, az_size_class) %>%
+  pivot_wider(
+    names_from = zone,
+    values_from = c(!!sym(ndvi_field), n_obs),
+    names_sep = "_"
+  ) %>%
+  filter(!is.na(get(paste0(ndvi_field, "_AZ"))) & !is.na(get(paste0(ndvi_field, "_USAZ")))) %>%
+  mutate(
+    ndvi_difference = get(paste0(ndvi_field, "_AZ")) - get(paste0(ndvi_field, "_USAZ")),
+    obs_difference = n_obs_AZ - n_obs_USAZ
+  ) %>%
+    filter(!is.na(ndvi_difference))
+  
+  cat(paste0("Paired site-year observations (", ndvi_suffix, "): "), nrow(paired_sites_annual), "\n")
+  cat(paste0("Unique sites with both zones (", ndvi_suffix, "): "), length(unique(paired_sites_annual$site_id)), "\n")
+  
+  # Site-specific paired comparisons with minimum 8 years (changed from 3)
+  site_specific_comparisons <- paired_sites_annual %>%
+    group_by(site_id, SubRegion, elevation_relative, az_size_class) %>%
+    summarise(
+      n_years = n(),
+      mean_az = mean(get(paste0(ndvi_field, "_AZ")), na.rm = TRUE),
+      mean_usaz = mean(get(paste0(ndvi_field, "_USAZ")), na.rm = TRUE),
+      mean_difference = mean(ndvi_difference, na.rm = TRUE),
+      se_difference = sd(ndvi_difference, na.rm = TRUE) / sqrt(n()),
+      t_stat = mean_difference / se_difference,
+      p_value = if(n() > 1) {
+        2 * pt(abs(t_stat), df = n()-1, lower.tail = FALSE)
+      } else NA_real_,
+      significant = !is.na(p_value) & p_value < 0.05,
+      .groups = "drop"
+    ) %>%
+    filter(n_years >= 8)  # minimum years changed here
+  
+  # Overall paired t-test on site means
+  overall_comparison <- t.test(site_specific_comparisons$mean_az, 
+                               site_specific_comparisons$mean_usaz,
+                               paired = TRUE)
+  
+  # Prepare data for mixed-effects model
+  zone_comparison_data <- annual_for_trends %>%
+    filter(site_id %in% unique(paired_sites_annual$site_id)) %>%
+    select(site_id, zone, year, !!sym(ndvi_field), SubRegion, elevation_relative, az_size_class)
+  
+  # Fit mixed-effects model
+  zone_mixed_model <- nlme::lme(
+    fixed = as.formula(paste(ndvi_field, "~ zone * year + SubRegion + elevation_relative")),
+    random = ~1 | site_id,
+    data = zone_comparison_data,
+    method = "REML"
+  )
+  
+  zone_model_summary <- summary(zone_mixed_model)
+  
+  # Calculate ndvi_difference for temporal difference model
+  paired_sites_annual <- paired_sites_annual %>%
+    mutate(ndvi_difference = ndvi_difference)
+  
+  temporal_difference_model <- nlme::lme(
+    ndvi_difference ~ year + SubRegion + elevation_relative,
+    random = ~1 | site_id,
+    data = paired_sites_annual,
+    method = "REML"
+  )
+  
+  # Paired trend analysis: join trend_analysis for this NDVI suffix and filter to paired sites
+  trend_analysis <- if(ndvi_suffix == "mean") trend_analysis_mean else trend_analysis_max
+  trend_analysis_subset <- trend_analysis %>%
+    filter(model_success, site_id %in% unique(paired_sites_annual$site_id)) %>%
+    select(site_id, zone, change_per_decade, significant_change, SubRegion, elevation_relative) %>%
+    pivot_wider(names_from = zone, values_from = c(change_per_decade, significant_change), 
+                names_sep = "_") %>%
+    filter(!is.na(change_per_decade_AZ), !is.na(change_per_decade_USAZ)) %>%
+    mutate(
+      trend_difference = change_per_decade_AZ - change_per_decade_USAZ,
+      both_increasing = change_per_decade_AZ > 0 & change_per_decade_USAZ > 0,
+      both_decreasing = change_per_decade_AZ < 0 & change_per_decade_USAZ < 0,
+      opposite_trends = sign(change_per_decade_AZ) != sign(change_per_decade_USAZ)
+    )
+  
+  # Regional summaries
+  regional_zone_summary <- site_specific_comparisons %>%
+    group_by(SubRegion) %>%
+    summarise(
+      n_sites = n(),
+      pct_az_higher = round(mean(mean_difference > 0) * 100, 1),
+      pct_significant = round(mean(significant, na.rm = TRUE) * 100, 1),
+      mean_az_ndvi = round(mean(mean_az), 3),
+      mean_usaz_ndvi = round(mean(mean_usaz), 3),
+      mean_difference = round(mean(mean_difference), 3),
+      median_difference = round(median(mean_difference), 3),
+      .groups = "drop"
+    )
+  
+  # Elevation effects on zone differences
+  elevation_zone_effects <- site_specific_comparisons %>%
+    filter(!is.na(elevation_relative)) %>%
+    mutate(
+      elevation_class = cut(elevation_relative, 
+                           breaks = c(-Inf, -100, 100, Inf),
+                           labels = c("Below average", "Average", "Above average"))
+    ) %>%
+    group_by(elevation_class) %>%
+    summarise(
+      n_sites = n(),
+      mean_difference = round(mean(mean_difference), 3),
+      median_difference = round(median(mean_difference), 3),
+      .groups = "drop"
+    )
+  
+  # Trend zone summary for correlation and agreement
+  trend_zone_summary <- trend_analysis_subset %>%
+    summarise(
+      n_sites = n(),
+      correlation = round(cor(change_per_decade_AZ, change_per_decade_USAZ), 3),
+      pct_both_increasing = round(mean(both_increasing) * 100, 1),
+      pct_both_decreasing = round(mean(both_decreasing) * 100, 1),
+      pct_opposite_trends = round(mean(opposite_trends) * 100, 1),
+      mean_trend_difference = round(mean(trend_difference), 4)
+    )
+  
+  # Write outputs
+  write_csv(paired_sites_annual, paste0(output_dir, "/", paired_sites_basename, ndvi_suffix, ".csv"))
+  write_csv(site_specific_comparisons, paste0(output_dir, "/", site_comparisons_basename, ndvi_suffix, ".csv"))
+  write_csv(trend_analysis_subset, paste0(output_dir, "/", trend_analysis_basename, ndvi_suffix, ".csv"))
+  write_csv(regional_zone_summary, paste0(output_dir, "/", regional_summary_basename, ndvi_suffix, ".csv"))
+  write_csv(elevation_zone_effects, paste0(output_dir, "/", elevation_effects_basename, ndvi_suffix, ".csv"))
+
+  zone_model_results <- data.frame(
+    term = rownames(zone_model_summary$tTable),
+    estimate = zone_model_summary$tTable[, "Value"],
+    se = zone_model_summary$tTable[, "Std.Error"],
+    t_value = zone_model_summary$tTable[, "t-value"],
+    p_value = zone_model_summary$tTable[, "p-value"]
+  )
+  write_csv(zone_model_results, paste0(output_dir, "/", zone_mixed_model_basename, ndvi_suffix, ".csv"))
+  
+  # Print key results
+  cat("=== ZONE COMPARISON RESULTS for NDVI ", ndvi_suffix, " ===\n", sep = "")
+  cat("Overall paired t-test (AZ vs USAZ):\n")
+  cat("t =", round(overall_comparison$statistic, 3), ", p =", round(overall_comparison$p.value, 3), "\n")
+  cat("Mean AZ NDVI:", round(mean(site_specific_comparisons$mean_az), 3), "\n")
+  cat("Mean USAZ NDVI:", round(mean(site_specific_comparisons$mean_usaz), 3), "\n")
+  cat("Mean difference (AZ - USAZ):", round(mean(site_specific_comparisons$mean_difference), 3), "\n\n")
+  
+  cat("Regional zone comparison summary:\n")
+  print(regional_zone_summary)
+  
+  cat("\nTrend comparison between zones:\n")
+  print(trend_zone_summary)
+  
+  invisible(NULL)
+}
+
+# Run analyses for both NDVI mean and max products
+process_zone_comparisons("mean")
+process_zone_comparisons("max")
+
+# Update processing log
+cat(step_str, "analysis finished:", format(Sys.time()), "\n\n", file = log_file, append = TRUE)

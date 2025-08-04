@@ -1,0 +1,129 @@
+# Alpine zone project - data processing script
+#   Workflow for ecological communities
+# Step 05: De-seasonalization and Annual Summaries
+#
+# Jonathan W. Chipman, Dartmouth College
+# Written with the assistance of Claude 4 Sonnet AI and GPT 4.1 mini
+# Updated 2025-06-27
+
+# Reads output/eco04_deseasonalized_data.csv (from Step 04)
+
+# Writes output/eco05_annual_summaries.csv - annually aggregated adjusted NDVI for each site
+# Writes output/eco05_annual_for_trends.csv - same as above (in theory could differ)
+# Writes output/eco05_sites_for_trends.csv - info about sites for trend calculations
+# Writes output/eco05_data_completeness_summary.csv - completeness of data at sites
+
+# Set current step number
+step_str <- "Step 05"
+step_txt <- "De-seasonalization and Annual Summaries"
+
+# Specify sigma for decay of weight with distance from peak DOY
+sigma <- 60    # 60 days defined as 1 sigma for gaussian weighting function
+
+# Required libraries
+library(tidyverse)
+
+# Set working directory and input
+setwd("D:/alpine_zone")
+deseasonalized_data_in <- "eco04_deseasonalized_data.csv"
+
+# Set output file info
+log_file <- "eco_processing_log.txt"
+output_dir <- "eco_output"
+annual_summaries_out <- "eco05_annual_summaries.csv"
+annual_for_trends_out <- "eco05_annual_for_trends.csv"
+sites_for_trends_out <- "eco05_sites_for_trends.csv"
+completeness_summary_out <- "eco05_data_completeness_summary.csv"
+
+# Initialize log file
+cat(step_str, step_txt, "\n", file = log_file, append = TRUE)
+cat("Analysis started:", format(Sys.time()), "\n", file = log_file, append = TRUE)
+
+# Read input data
+deseasonalized_data <- read_csv(file.path(output_dir, deseasonalized_data_in))
+
+# Create annual summaries using de-seasonalized data
+annual_summaries <- deseasonalized_data %>%
+  filter(!is.na(adj_ndvi_for_mean), !is.na(adj_ndvi_for_max), !is.na(doy_max_seasonal)) %>%
+  group_by(site_id, zone, year, SP, SubRegion, Elevation_m, 
+           Area_AZ_ha, Area_USAZ_ha, elevation_relative, 
+           az_size_class) %>%
+  mutate(
+    # Calculate weight per observation based on distance from modeled peak DOY
+    weight_peak = exp(- (doy - doy_max_seasonal)^2 / (2 * sigma^2))
+  ) %>%
+  summarise(
+    ndvi_annual_raw = mean(ndvi, na.rm = TRUE),
+    ndvi_annual_deseason_mean = mean(adj_ndvi_for_mean, na.rm = TRUE),
+    
+    # Weighted mean for max-adjusted NDVI
+    ndvi_annual_deseason_max = if(sum(weight_peak, na.rm = TRUE) > 0) {
+      sum(adj_ndvi_for_max * weight_peak, na.rm = TRUE) / sum(weight_peak, na.rm = TRUE)
+    } else {
+      NA_real_
+    },
+    
+    n_obs = n(),
+    se_annual = sd(adj_ndvi_for_mean, na.rm = TRUE) / sqrt(n()),
+    weight_factor = sqrt(n()),
+    
+    first_doy = min(doy, na.rm = TRUE),
+    last_doy = max(doy, na.rm = TRUE),
+    doy_range = last_doy - first_doy,
+    
+    mean_pct_valid = mean(pct_valid, na.rm = TRUE),
+    
+    .groups = "drop"
+  ) %>%
+  filter(n_obs >= 1)  # Keep only years with observations
+
+# Site-level filtering for trend analysis
+sites_for_trends <- annual_summaries %>%
+  group_by(site_id, zone) %>%
+  summarise(
+    n_years = n_distinct(year),
+    total_obs = sum(n_obs),
+    year_span = max(year) - min(year) + 1,
+    data_completeness = n_years / year_span,
+    .groups = "drop"
+  ) %>%
+  filter(n_years >= 8)  # Minimum years for trend analysis
+
+# Filter annual data for trend analysis
+annual_for_trends <- annual_summaries %>%
+  semi_join(sites_for_trends, by = c("site_id", "zone"))
+
+# Summary statistics
+cat("Annual summaries created for:\n")
+cat("- Total site-zone-year combinations:", nrow(annual_summaries), "\n")
+cat("- Unique sites:", length(unique(annual_summaries$site_id)), "\n")
+cat("- Year range:", min(annual_summaries$year), "to", max(annual_summaries$year), "\n")
+cat("- Site-zone combinations with ≥8 years:", nrow(sites_for_trends), "\n")
+
+# Check data completeness
+completeness_summary <- annual_summaries %>%
+  group_by(site_id, zone) %>%
+  summarise(
+    n_years = n(),
+    year_span = max(year) - min(year) + 1,
+    completeness = round(n_years / year_span, 2),
+    mean_obs_per_year = round(mean(n_obs), 1),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(completeness))
+
+# Save results
+write_csv(annual_summaries, file.path(output_dir, annual_summaries_out))
+write_csv(annual_for_trends, file.path(output_dir, annual_for_trends_out))
+write_csv(sites_for_trends, file.path(output_dir, sites_for_trends_out))
+write_csv(completeness_summary, file.path(output_dir, completeness_summary_out))
+
+# Print completeness summary
+cat("\nData completeness by site (top 10):\n")
+print(head(completeness_summary, 10))
+
+cat("\nData completeness by site (bottom 10):\n")
+print(tail(completeness_summary, 10))
+
+# Update processing log
+cat(step_str,"analysis finished:", format(Sys.time()), "\n\n", file = log_file, append = TRUE)

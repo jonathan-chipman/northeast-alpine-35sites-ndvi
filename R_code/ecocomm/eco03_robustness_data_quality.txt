@@ -1,0 +1,202 @@
+# Alpine zone project - data processing script
+#   Workflow for ecological communities
+# Step 03: Robustness Checks - Data Quality
+#
+# Jonathan W. Chipman, Dartmouth College
+# Written with the assistance of Claude 4 Sonnet AI
+# Updated 2025-06-27
+
+# Reads output/eco02_analysis_data_prepared.csv (from Step 02)
+
+# Writes output/eco03_pctvalid_within_site_correlations.csv - correlations btw NDVI and pct_valid
+# Writes output/eco03_low_pctvalid_sites.csv - listing of sites by pctvalid, with statistics
+# Writes output/eco03_seasonal_pctvalid_patterns.csv - pctvalid by month
+# Writes output/eco03_ndvi_by_pctvalid_ranges.csv - mean NDVI by ranges of pctvalid
+# Writes output/eco03_multi_path_sites.csv - sites that are imaged from 2 WRS-2 paths
+# Writes output/eco03_path_effects_analysis.csv - impacts of east- vs west-looking images
+# Writes output/eco03_path_coverage_by_time.csv - timing of paths
+
+# Set current step number
+step_str <- "Step 03"
+step_txt <- "Robustness Checks - Data Quality"
+
+# Required libraries
+library(tidyverse)
+library(lubridate)
+
+# Set working directory and input
+setwd("D:/alpine_zone")
+analysis_file <- "eco02_analysis_data_prepared.csv"
+
+# Set output file info
+log_file <- "eco_processing_log.txt"
+output_dir <- "eco_output"
+pctvalid_within_site_out <- "eco03_pctvalid_within_site_correlations.csv"
+low_pctvalid_sites_out <- "eco03_low_pctvalid_sites.csv"
+seasonal_pctvalid_out <- "eco03_seasonal_pctvalid.csv"
+ndvi_by_pctvalid_out <- "eco03_ndvi_by_pctvalid.csv"
+multi_path_sites_out <- "eco03_multi_path_sites.csv"
+path_effects_out <- "eco03_path_effects_analysis.csv"
+path_coverage_time_out <- "eco03_path_coverage_by_time.csv"
+
+# Initialize log file
+cat(step_str, step_txt, "\n", file = log_file, append = TRUE)
+cat("Analysis started:", format(Sys.time()), "\n", file = log_file, append = TRUE)
+
+# Read input data
+analysis_data <- read_csv(file.path(output_dir, analysis_file))
+
+# pctValid effects analysis
+cat("=== PCTVALID EFFECTS ANALYSIS ===\n")
+
+# Within-site correlation between pctValid and NDVI
+pctvalid_within_site <- analysis_data %>%
+  group_by(site_id, zone) %>%
+  filter(n() >= 10) %>%  # Need sufficient observations
+  summarise(
+    pctvalid_ndvi_cor = cor(pct_valid, ndvi, use = "complete.obs"),
+    n_obs = n(),
+    mean_pctvalid = mean(pct_valid),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(pctvalid_ndvi_cor))
+
+# Sites with consistently low pctValid
+low_pctvalid_sites <- analysis_data %>%
+  group_by(site_id, zone) %>%
+  summarise(
+    mean_pctvalid = mean(pct_valid),
+    median_pctvalid = median(pct_valid),
+    q25_pctvalid = quantile(pct_valid, 0.25),
+    n_obs = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(mean_pctvalid)
+
+# Seasonal patterns in pctValid
+seasonal_pctvalid <- analysis_data %>%
+  mutate(month = month(date, label = TRUE)) %>%
+  group_by(month, zone) %>%
+  summarise(
+    mean_pctvalid = mean(pct_valid),
+    median_pctvalid = median(pct_valid),
+    n_obs = n(),
+    .groups = "drop"
+  )
+
+# NDVI by pctValid ranges
+ndvi_by_pctvalid <- analysis_data %>%
+  mutate(
+    pctvalid_range = cut(pct_valid, 
+                         breaks = c(0.5, 0.7, 0.9, 1.0),
+                         labels = c("0.5-0.7", "0.7-0.9", "0.9-1.0"),
+                         include.lowest = TRUE)
+  ) %>%
+  group_by(site_id, zone, pctvalid_range) %>%
+  summarise(
+    mean_ndvi = mean(ndvi, na.rm = TRUE),
+    n_obs = n(),
+    .groups = "drop"
+  ) %>%
+  filter(n_obs >= 3)  # Need multiple observations per range
+
+# WRS-2 path effects analysis
+cat("=== WRS-2 PATH EFFECTS ANALYSIS ===\n")
+
+# Identify sites observed from multiple paths
+multi_path_sites <- analysis_data %>%
+  group_by(site_id, zone) %>%
+  summarise(
+    n_paths = n_distinct(path),
+    paths = paste(sort(unique(path)), collapse = ", "),
+    .groups = "drop"
+  ) %>%
+  filter(n_paths > 1)
+
+cat("Sites observed from multiple paths:", nrow(multi_path_sites), "\n")
+
+# For multi-path sites, test for systematic differences
+path_effects <- tibble()
+
+if (nrow(multi_path_sites) > 0) {
+  path_effects <- analysis_data %>%
+    filter(site_id %in% multi_path_sites$site_id) %>%
+    group_by(site_id, zone) %>%
+    filter(n_distinct(path) > 1, n() >= 10) %>%
+    nest() %>%
+    mutate(
+      path_comparison = map(data, ~{
+        if(length(unique(.x$path)) == 2) {
+          paths <- unique(.x$path)
+          path1_data <- filter(.x, path == paths[1])
+          path2_data <- filter(.x, path == paths[2])
+          
+          if(nrow(path1_data) >= 3 & nrow(path2_data) >= 3) {
+            t_test <- t.test(path1_data$ndvi, path2_data$ndvi)
+            tibble(
+              path1 = paths[1],
+              path2 = paths[2],
+              path1_mean = mean(path1_data$ndvi),
+              path2_mean = mean(path2_data$ndvi),
+              path1_n = nrow(path1_data),
+              path2_n = nrow(path2_data),
+              t_stat = t_test$statistic,
+              p_value = t_test$p.value,
+              significant = p_value < 0.05
+            )
+          } else {
+            tibble(path1 = paths[1], path2 = paths[2], 
+                   path1_mean = NA, path2_mean = NA,
+                   path1_n = nrow(path1_data), path2_n = nrow(path2_data),
+                   t_stat = NA, p_value = NA, significant = FALSE)
+          }
+        } else {
+          tibble(path1 = NA, path2 = NA, path1_mean = NA, path2_mean = NA,
+                 path1_n = NA, path2_n = NA, t_stat = NA, p_value = NA, significant = FALSE)
+        }
+      })
+    ) %>%
+    unnest(path_comparison)
+}
+
+# Path coverage over time
+path_coverage_time <- analysis_data %>%
+  group_by(site_id, zone, decade, path) %>%
+  summarise(n_obs = n(), .groups = "drop") %>%
+  group_by(site_id, zone, decade) %>%
+  summarise(
+    n_paths = n_distinct(path),
+    primary_path = path[which.max(n_obs)],
+    path_distribution = paste(paste(path, n_obs, sep = ":"), collapse = ", "),
+    .groups = "drop"
+  )
+
+# Save results
+write_csv(pctvalid_within_site, file.path(output_dir, pctvalid_within_site_out))
+write_csv(low_pctvalid_sites, file.path(output_dir, low_pctvalid_sites_out))
+write_csv(seasonal_pctvalid, file.path(output_dir, seasonal_pctvalid_out))
+write_csv(ndvi_by_pctvalid, file.path(output_dir, ndvi_by_pctvalid_out))
+write_csv(multi_path_sites, file.path(output_dir, multi_path_sites_out))
+write_csv(path_effects, file.path(output_dir, path_effects_out))
+write_csv(path_coverage_time, file.path(output_dir, path_coverage_time_out))
+
+# Print summaries
+cat("Sites with significant pctValid-NDVI correlation (|r| > 0.3):\n")
+print(filter(pctvalid_within_site, abs(pctvalid_ndvi_cor) > 0.3))
+
+cat("\nSites with lowest mean pctValid (bottom 10):\n")
+print(head(low_pctvalid_sites, 10))
+
+cat("\nSeasonal pctValid patterns:\n")
+print(seasonal_pctvalid)
+
+if (nrow(path_effects) > 0) {
+  cat("\nSignificant path effects:\n")
+  print(filter(path_effects, significant == TRUE))
+}
+
+cat("Robustness checks completed:", Sys.time(), "\n", 
+    file = log_file, append = TRUE)
+
+# Update processing log
+cat(step_str,"analysis finished:", format(Sys.time()), "\n\n", file = log_file, append = TRUE)

@@ -1,0 +1,36 @@
+﻿SP,Site,Name,Latitude_deg,Longitude_deg,Elevation_m,Area_AZ_ha,Area_USAZ_ha,SubRegion
+QC,JAC,Mont Jacques-Cartier,48.9873,-65.9482,1276,1393.7,804.2,Monts McGerrigle
+QC,CON,Les Cônes,48.9474,-65.9492,1207,1206,1006,Monts McGerrigle
+QC,RIC,Mont Richardson,48.9272,-66.0171,1180,71.2,104.7,Monts McGerrigle
+QC,PSA,Petit Mont Sainte-Anne,49.0099,-66.01,1147,227.4,259.1,Monts McGerrigle
+QC,SOM,Sommet 1147,49.0138,-65.9738,1147,323.5,254.7,Monts McGerrigle
+QC,XAL,Mont Xalibu,48.9642,-66.0117,1140,577.6,620.4,Monts McGerrigle
+QC,CAS,Mont des Lacs du Castor,48.8986,-66.0148,1136,107,159.1,Monts McGerrigle
+QC,AUC,Mont Auclair,49.0441,-65.9519,1105,19.1,47.4,Monts McGerrigle
+QC,JOS,Mont Joseph-Fortin,48.9398,-66.0188,1086,12.3,47.5,Monts McGerrigle
+QC,MSA,Mont Sainte-Anne,49.0352,-65.9776,1068,61.6,82.1,Monts McGerrigle
+QC,MIC,Mont Michaud,49.0272,-65.9239,1040,8,38.6,Monts McGerrigle
+QC,MCW,Mont McWhirter,48.9107,-65.9447,1036,58.6,80.5,Monts McGerrigle
+QC,VIE,Pic du Vieillard,48.9973,-65.8986,1026,30.5,68.5,Monts McGerrigle
+QC,ALB,Mont Albert,48.9016,-66.2032,1151,3190.9,712.2,Monts Chic-Chocs
+QC,LOG,Mont Logan,48.8906,-66.6389,1150,113.9,138.1,Monts Chic-Chocs
+QC,COL,Mont Collins,48.8758,-66.6839,1041,90.9,107.6,Monts Chic-Chocs
+QC,FOR,Mont Fortin,48.8852,-66.6634,1017,20,74.4,Monts Chic-Chocs
+ME,KAT,Katahdin,45.9044,-68.9214,1606,1619.3,702.8,Baxter State Park
+ME,NBR,North Brother,45.9573,-68.9854,1265,41.3,73.7,Baxter State Park
+ME,SUG,Sugarloaf Mountain,45.0318,-70.3132,1292,77.6,155.3,Longfellow Mountains
+ME,BIG,Mount Bigelow,45.1468,-70.2882,1259,31.8,230.2,Longfellow Mountains
+ME,SAD,Saddleback Mountain,44.9366,-70.5047,1256,110.9,244.7,Longfellow Mountains
+ME,ABR,Mount Abraham,44.973,-70.3265,1234,71.9,131,Longfellow Mountains
+NH,PRE,Presidential Range,44.2705,-71.3033,1917,2771,1332.1,White Mountains
+NH,FRA,Franconia Ridge,44.1607,-71.6444,1598,92.6,226.6,White Mountains
+NH,MOO,Mount Moosilauke,44.0234,-71.8315,1463,32.5,88.8,White Mountains
+NH,BON,Mount Bond,44.1529,-71.5313,1431,44.5,117.4,White Mountains
+NH,GUY,Mount Guyot,44.1683,-71.5341,1397,29.1,65.1,White Mountains
+VT,MAN,Mount Mansfield,44.5439,-72.8143,1340,140.8,356.4,Green Mountains
+VT,CAM,Camel's Hump,44.3196,-72.8863,1243,4.3,40.2,Green Mountains
+NY,MAR,Mount Marcy,44.1129,-73.9238,1629,88,111.3,Adirondack Mountains
+NY,ALG,Mount Algonquin,44.1436,-73.9867,1559,130.6,197.4,Adirondack Mountains
+NY,HAY,Mount Haystack,44.1058,-73.9008,1512,59.6,90.6,Adirondack Mountains
+NY,SKY,Mount Skylight,44.0995,-73.9312,1501,63.8,90.4,Adirondack Mountains
+NY,WHF,Whiteface Mountain,44.3658,-73.9032,1483,22.2,79.5,Adirondack Mountains

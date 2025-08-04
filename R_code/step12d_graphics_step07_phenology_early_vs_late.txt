@@ -1,0 +1,201 @@
+library(tidyverse)
+library(mgcv)
+library(purrr)
+library(ggplot2)
+library(patchwork)
+
+# Set working directory and output paths
+setwd("D:/alpine_zone")
+output_dir <- "output"
+log_file <- "processing_log.txt"
+
+# ---- User selections (editable) ----
+selected_sites <- c("QC_LOG", "QC_ALB", "QC_JAC")  # 2 or 3 sites
+selected_zones <- c("AZ", "USAZ")                  # 2 to 7 zones
+
+# Time windows (5-year blocks)
+early_years <- 1984:1989
+late_years  <- 2020:2024
+
+doy_seq <- 152:273
+n_bootstrap <- 100
+
+cat("Starting expanded phenology plotting with uncertainty and multi-zone comparison...\n", file = log_file, append = TRUE)
+
+# Read prepared data (filter by selected sites and zones)
+infile <- paste0(output_dir, "/step02_analysis_data_prepared.csv")
+analysis_data <- read_csv(infile) %>%
+  filter(site_id %in% selected_sites, zone %in% selected_zones, doy %in% doy_seq)
+
+# Bootstrap prediction function (same as before)
+fit_predict_bootstrap <- function(data, years) {
+  doy_range <- seq(min(doy_seq), max(doy_seq))
+  pred_grid <- expand_grid(doy = doy_range, year = years)
+  
+  boot_preds <- vector("list", n_bootstrap)
+  
+  for (b in seq_len(n_bootstrap)) {
+    boot_sample <- data %>% slice_sample(prop = 1, replace = TRUE)
+    boot_gam <- tryCatch({
+      gam(ndvi ~ te(doy, year, k = c(4, 8)),
+          data = boot_sample, method = "REML")
+    }, error = function(e) NULL)
+    
+    if (is.null(boot_gam)) {
+      boot_preds[[b]] <- pred_grid %>% mutate(pred = NA_real_)
+    } else {
+      pred_vals <- predict(boot_gam, newdata = pred_grid)
+      boot_preds[[b]] <- pred_grid %>% mutate(pred = pred_vals)
+    }
+  }
+  
+  combined <- bind_rows(boot_preds, .id = "bootstrap") %>%
+    mutate(bootstrap = as.integer(bootstrap)) %>%
+    group_by(year, doy) %>%
+    summarise(
+      pred_median = median(pred, na.rm = TRUE),
+      pred_low = quantile(pred, 0.025, na.rm = TRUE),
+      pred_high = quantile(pred, 0.975, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  return(combined)
+}
+
+# ---- Compute predictions and collect all data for scaling ----
+all_results <- crossing(site_id = selected_sites, zone = selected_zones) %>%
+  mutate(data = map2(site_id, zone, ~ analysis_data %>% filter(site_id == .x, zone == .y))) %>%
+  mutate(
+    early_data = map(data, ~ filter(.x, year %in% early_years)),
+    late_data  = map(data, ~ filter(.x, year %in% late_years)),
+    early_preds = map2(data, zone, ~ fit_predict_bootstrap(.x, early_years)),
+    late_preds  = map2(data, zone, ~ fit_predict_bootstrap(.x, late_years))
+  )
+
+# Average curves across years within each period (early/late) per site-zone
+average_curve <- function(preds_df) {
+  preds_df %>%
+    group_by(doy) %>%
+    summarise(
+      pred_median = mean(pred_median, na.rm = TRUE),
+      pred_low = mean(pred_low, na.rm = TRUE),
+      pred_high = mean(pred_high, na.rm = TRUE),
+      .groups = "drop"
+    )
+}
+
+all_results <- all_results %>%
+  mutate(
+    early_avg = map(early_preds, average_curve) %>% map(~ mutate(.x, period = "Early (1984-1989)")),
+    late_avg = map(late_preds, average_curve) %>% map(~ mutate(.x, period = "Late (2020-2024)"))
+  )
+
+# Combine all avg curves and observations for axis scaling
+combined_y_vals <- c()
+combined_x_vals <- doy_seq
+
+for (row_i in seq_len(nrow(all_results))) {
+  # Gather predicted lows and highs and observations for early and late
+  ea <- all_results$early_avg[[row_i]]
+  la <- all_results$late_avg[[row_i]]
+  ed <- all_results$early_data[[row_i]]
+  ld <- all_results$late_data[[row_i]]
+  
+  combined_y_vals <- c(combined_y_vals,
+                      ea$pred_low, ea$pred_high,
+                      la$pred_low, la$pred_high,
+                      ed$ndvi, ld$ndvi)
+}
+
+y_min_all <- min(combined_y_vals, na.rm = TRUE) * 0.98
+y_max_all <- max(combined_y_vals, na.rm = TRUE) * 1.02
+
+# ---- Plotting ----
+
+make_panel_plot <- function(site_id_cur, zone_cur, early_avg, late_avg, early_data, late_data,
+                            y_limits, show_y_label = FALSE, show_x_label = FALSE) {
+  ggplot() +
+    geom_ribbon(data = early_avg,
+                aes(x = doy, ymin = pred_low, ymax = pred_high),
+                fill = "grey85", alpha = 0.5) +
+    geom_ribbon(data = late_avg,
+                aes(x = doy, ymin = pred_low, ymax = pred_high),
+                fill = "grey65", alpha = 0.5) +
+    geom_line(data = early_avg,
+              aes(x = doy, y = pred_median),
+              color = "black", size = 1.2) +
+    geom_line(data = late_avg,
+              aes(x = doy, y = pred_median),
+              color = "black", size = 1.2) +
+    geom_point(data = early_data,
+               aes(x = doy, y = ndvi),
+               color = "orange", size = 2.5, alpha = 0.7) +
+    geom_point(data = late_data,
+               aes(x = doy, y = ndvi),
+               color = "red", size = 2.5, alpha = 0.7) +
+    coord_cartesian(ylim = y_limits, xlim = range(doy_seq), expand = FALSE) +
+    scale_x_continuous(breaks = seq(160, 270, 20)) +
+    theme_minimal(base_size = 20) +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.line.x = element_line(color = "black"),
+      axis.line.y = element_line(color = "black"),
+      axis.ticks.length = unit(6, "pt"),
+      legend.position = "none",
+      axis.text = element_text(size = 20),
+      plot.title = element_text(hjust = 0.5, size = 24, face = "bold"),
+      axis.title.y = if (show_y_label) element_text(size = 22, margin = margin(r = 10)) else element_blank(),
+      axis.title.x = if (show_x_label) element_text(size = 22, margin = margin(t = 10)) else element_blank()
+    ) +
+    labs(
+      y = ifelse(show_y_label, "NDVI", ""),
+      x = ifelse(show_x_label, "day of year", ""),
+      title = paste0(site_id_cur, " - Zone: ", zone_cur)
+    )
+}
+
+# Create plots: for first zone (top row), then second zone (bottom row), etc.
+plot_grid_list <- list()
+
+for (zone_i in seq_along(selected_zones)) {
+  zone_cur <- selected_zones[zone_i]
+  row_plots <- list()
+  
+  for (site_i in seq_along(selected_sites)) {
+    site_cur <- selected_sites[site_i]
+    
+    idx <- which(all_results$site_id == site_cur & all_results$zone == zone_cur)
+    
+    show_y <- (site_i == 1)       # first panel of the row, show y label
+    show_x <- (zone_i == length(selected_zones))  # last row, show x label
+    
+    p <- make_panel_plot(
+      site_id_cur = site_cur,
+      zone_cur = zone_cur,
+      early_avg = all_results$early_avg[[idx]],
+      late_avg = all_results$late_avg[[idx]],
+      early_data = all_results$early_data[[idx]],
+      late_data = all_results$late_data[[idx]],
+      y_limits = c(y_min_all, y_max_all),
+      show_y_label = show_y,
+      show_x_label = show_x
+    )
+    row_plots[[site_i]] <- p
+  }
+  
+  plot_grid_list[[zone_i]] <- wrap_plots(row_plots, ncol = length(selected_sites))
+}
+
+# Combine all rows vertically
+final_layout <- wrap_plots(plot_grid_list, ncol = 1)
+
+# Create figures directory if needed
+figures_dir <- file.path(output_dir, "figures")
+if (!dir.exists(figures_dir)) dir.create(figures_dir)
+
+outfile <- file.path(figures_dir, paste0("phenology_multisite_multizone_uncertainty.png"))
+
+ggsave(outfile, plot = final_layout, width = 6 * length(selected_sites), height = 6 * length(selected_zones), dpi = 500)
+
+cat("Saved multi-site, multi-zone phenology comparison plot to", outfile, "\n", file = log_file, append = TRUE)
